@@ -67,6 +67,7 @@ The preview reports the number of distinct uploads found, how many a normal run 
 | --- | --- |
 | `--limit N` | Scan all three upload lists and process up to `N` uploads, starting with private uploads. |
 | `--dry-run` | Preview upload and planned download counts without writing archive files. |
+| `--refresh-viewer` | Regenerate offline viewer data from an existing archive without signing in. |
 | `--retry-placeholders` | Check whether an original video is available for each selected upload with a saved placeholder. |
 | `--browser chrome` | Optional for compatibility with existing commands. The script always uses Google Chrome. |
 | `--output PATH` | Save to a custom folder. The default is the folder containing the script. Use a separate output folder for each account. |
@@ -77,13 +78,30 @@ The preview reports the number of distinct uploads found, how many a normal run 
 | Path | Contents |
 | --- | --- |
 | `videos/` | Downloaded videos named by their Vbox7 video IDs, usually as MP4 files. |
-| `misc/metadata.json` | A catalog keyed by video ID. Entries can include the title, uploader, upload date, visibility, page URL, view and comment counts, comment text, and relative path to the saved video. |
+| `misc/metadata.json` | A catalog keyed by video ID. The `author` field stores the uploader shown on the video page when available. Archive runs fill missing authors with the archive account username, including in older entries. Entries can also include the title, upload date, visibility, page URL, view and comment counts, comment text, and relative path to the saved video. |
+| `misc/viewer-data.js` | A local copy of the catalog for automatic loading in the offline viewer. Like the JSON catalog, it can contain private videos' details and comments. |
 
 When the signed-in player reports a blank source, the archiver saves Vbox7's blank video as `videos/<id>.placeholder.mp4` and saves its animated static overlay once as `videos/vbox7-static.gif`. The catalog keeps the original upload's available metadata and comments, marks the video with `video_is_placeholder`, and links the overlay in `placeholder_static_file`. The run summary counts placeholders separately.
 
 Saved placeholders can be reused on later runs. Add `--retry-placeholders` to check whether the original has become available. The catalog keeps pointing to the saved placeholder until a validated original is saved.
 
 The archive can contain private videos and comments. Git ignores generated contents in the repository's default `videos/` and `misc/` directories. Keep custom archives outside the checkout and generated files out of public releases.
+
+## Browse an archive offline
+
+Open [archive-viewer.html](archive-viewer.html) from your local checkout in Chrome. It automatically opens the archive beside the page when `misc/viewer-data.js` is present. Reload the page after an archive run to see the updated catalog.
+
+Click **Open archive folder** to browse a custom `--output` folder or an older archive. You can also copy the HTML file into a custom output folder to give it the same automatic loading behavior. Select an upload to open its local video, details, and saved comments. The viewer marks placeholders and keeps details available when a video file is missing.
+
+The upload list shows still-frame previews from supported local videos as you scroll. Click a column heading to sort by title, upload date, views, or comments. Click the same heading again to reverse the sort, and a third time to restore archive order. On narrow screens, use the **Sort by** menu.
+
+Normal archive runs generate the viewer data at the end. To enable automatic loading for an existing archive or refresh the viewer after an interrupted run, use the following command from the project virtual environment. Add `--output PATH` if needed.
+
+```sh
+python vbox7_archive.py YOUR_USERNAME --refresh-viewer
+```
+
+The viewer runs entirely in your browser and reads local files. It works offline without a server or a Vbox7 sign-in.
 
 ## Check or resume an archive
 

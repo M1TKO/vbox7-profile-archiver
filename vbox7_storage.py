@@ -108,14 +108,25 @@ def valid_static(path):
     return False
 
 
-def save_json(path, data):
+def save_text(path, write):
     with staged_file(path) as temporary:
         with temporary.open("w", encoding="utf-8") as output:
-            json.dump(data, output, ensure_ascii=False, indent=2)
+            write(output)
             output.write("\n")
             output.flush()
             os.fsync(output.fileno())
         temporary.replace(path)
+
+
+def save_json(path, data):
+    save_text(path, lambda output: json.dump(data, output, ensure_ascii=False, indent=2))
+
+
+def save_viewer_data(path, catalog):
+    # A classic script can load from disk in Chrome when fetch() of local JSON cannot.
+    payload = json.dumps(catalog, ensure_ascii=False, separators=(",", ":"))
+    literal = json.dumps(payload, ensure_ascii=False).replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
+    save_text(path, lambda output: output.write(f"globalThis.vbox7ViewerCatalog = JSON.parse({literal});"))
 
 
 @contextmanager

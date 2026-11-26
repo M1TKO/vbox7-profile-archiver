@@ -128,6 +128,30 @@ class ArchiveTests(unittest.TestCase):
         self.videos = self.output / "videos"
         self.videos.mkdir()
 
+    def test_catalog_saves_page_author_and_fills_missing_authors(self):
+        for video_id in ("a", "b"):
+            (self.videos / f"{video_id}.mp4").write_bytes(VIDEO)
+        index = self.output / "misc" / "metadata.json"
+        catalog = {"username": "Owner", "uploads": {
+            "a": dict(RECORD, author="Saved uploader"),
+            "c": dict(RECORD, id="c", url=archive.BASE + "/play:c"),
+        }}
+        args = SimpleNamespace(username="owner", limit=2, dry_run=False, retry_placeholders=False)
+        context = SimpleNamespace(request=None, new_page=lambda: None)
+        second = dict(RECORD, id="b", url=archive.BASE + "/play:b")
+        page = '<div class="video-info"><a class="channel-name">{}</a></div>'
+        with archive.archive_lock(index.parent), patch.object(
+            archive, "discover", side_effect=[iter([dict(RECORD), second]), iter([]), iter([])]
+        ), patch.object(archive, "fetch", side_effect=[
+            (page.format(" "), RECORD["url"]), comments(0, ""),
+            (page.format("Actual uploader"), second["url"]), comments(0, ""),
+        ]), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(archive.process_archive(args, context, None, catalog, self.videos, index), 0)
+
+        uploads = json.loads(index.read_text(encoding="utf-8"))["uploads"]
+        self.assertEqual({key: row.get("author") for key, row in uploads.items()},
+                         {"a": "Saved uploader", "b": "Actual uploader", "c": "Owner"})
+
     def test_partial_refresh_preserves_previous_comment_snapshot(self):
         (self.videos / "a.mp4").write_bytes(VIDEO)
         saved = [{"id": str(i), "text": "Synthetic"} for i in range(3)]

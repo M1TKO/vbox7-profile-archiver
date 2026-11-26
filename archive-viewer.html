@@ -1,0 +1,596 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' file:; style-src 'unsafe-inline'; media-src blob: file:; img-src blob: file:; base-uri 'none'">
+<title>Vbox7 Archive Viewer</title>
+<style>
+  :root {
+    color-scheme: dark;
+    font-family: system-ui, sans-serif;
+    --background: #111412;
+    --panel: #1b201c;
+    --line: #3b443d;
+    --text: #f1f4eb;
+    --muted: #b9c4b8;
+    --accent: #dfef8c;
+    --warning: #ffd298;
+    background: var(--background);
+    color: var(--text);
+  }
+  *, *::before, *::after { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body { margin: 0; }
+  button { font: inherit; cursor: pointer; }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
+  button:disabled { cursor: wait; opacity: .7; }
+  .shell { width: min(100% - 2.5rem, 70rem); margin-inline: auto; }
+  .hero {
+    background: radial-gradient(ellipse at 85% 5%, #303a25, transparent 65%), #1a211b;
+    border-bottom: 1px solid var(--line);
+    padding-block: clamp(2rem, 7vw, 5rem);
+  }
+  .hero-inner { display: flex; align-items: end; justify-content: space-between; gap: 1.5rem; flex-wrap: wrap; }
+  h1 { margin: 0; font-size: clamp(2.3rem, 6vw, 4.5rem); letter-spacing: -.065em; line-height: 1; }
+  .status { margin: .85rem 0 0; min-height: 1.5em; color: var(--muted); overflow-wrap: anywhere; }
+  .button {
+    min-height: 2.75rem;
+    border: 1px solid transparent;
+    border-radius: .55rem;
+    padding: .6rem 1rem;
+    color: #1a2311;
+    background: var(--accent);
+    font-weight: 650;
+  }
+  .button:hover { background: #eef8ba; }
+  main {
+    --upload-columns: 7.5rem minmax(0, 1fr) minmax(6.5rem, .36fr) minmax(5.75rem, .25fr) minmax(5.75rem, .25fr);
+    margin-block: 1.5rem 3rem;
+  }
+  .notice { color: var(--warning); margin: 0 0 1rem; }
+  .empty { color: var(--muted); border: 1px dashed var(--line); border-radius: .75rem; padding: 1.25rem; }
+  .toolbar { display: none; align-items: center; justify-content: end; flex-wrap: wrap; gap: .5rem; margin: 0 0 .75rem; color: var(--muted); }
+  .toolbar select {
+    max-width: 100%;
+    min-height: 2.5rem;
+    padding: .4rem .6rem;
+    border: 1px solid var(--line);
+    border-radius: .45rem;
+    background: var(--panel);
+    color: var(--text);
+    font: inherit;
+  }
+  .toolbar select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .uploads { list-style: none; padding: 0; margin: 0; display: grid; gap: .55rem; }
+  .upload, .column-header {
+    display: grid;
+    grid-template-columns: var(--upload-columns);
+    gap: .75rem;
+    align-items: center;
+    text-align: left;
+    padding: .75rem 1rem;
+  }
+  .column-header {
+    border: 1px solid transparent;
+    border-bottom-color: var(--line);
+    color: var(--muted);
+    margin-bottom: .55rem;
+    font-size: .875rem;
+    font-weight: 600;
+  }
+  .column-header button {
+    width: fit-content;
+    display: inline-flex;
+    align-items: center;
+    gap: .25rem;
+    padding: 0;
+    text-align: left;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font-weight: inherit;
+  }
+  .column-header button:hover, .column-header button[aria-pressed="true"] { color: var(--accent); }
+  .sort-indicator { font-size: .8rem; }
+  .upload {
+    width: 100%;
+    border: 1px solid var(--line);
+    border-radius: .65rem;
+    color: var(--text);
+    background: var(--panel);
+  }
+  .upload:hover { border-color: #89966b; background: #252d24; }
+  .thumbnail {
+    position: relative;
+    display: grid;
+    place-items: center;
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    overflow: hidden;
+    border-radius: .45rem;
+    background: #353e2b;
+    color: var(--accent);
+  }
+  .thumbnail canvas { position: absolute; inset: 0; width: 100%; height: 100%; background: #0a0d0a; }
+  .thumbnail.play::after {
+    content: "";
+    border-block: .36rem solid transparent;
+    border-left: .58rem solid currentColor;
+    margin-left: .12rem;
+  }
+  .thumbnail.play:has(canvas)::after {
+    position: absolute;
+    right: .4rem;
+    bottom: .4rem;
+    filter: drop-shadow(0 1px 3px #000) drop-shadow(0 1px 3px #000);
+  }
+  .upload-title { display: block; font-weight: 650; overflow-wrap: anywhere; }
+  .upload-date, .metric, .video-status { color: var(--muted); font-size: .875rem; overflow-wrap: anywhere; }
+  .video-status { display: block; margin-top: .16rem; }
+  .visibility { border: 1px solid #566451; border-radius: 1rem; width: fit-content; padding: .16rem .53rem; }
+  dialog {
+    width: min(54rem, calc(100% - 1.5rem));
+    max-height: calc(100% - 1.5rem);
+    padding: 0;
+    border: 1px solid var(--line);
+    border-radius: .85rem;
+    background: var(--panel);
+    color: var(--text);
+    overscroll-behavior: contain;
+  }
+  dialog::backdrop { background: #090c0ae0; }
+  .dialog-header {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    display: flex;
+    justify-content: space-between;
+    align-items: start;
+    gap: 1rem;
+    padding: 1rem clamp(.9rem, 4vw, 1.65rem);
+    border-bottom: 1px solid var(--line);
+    background: var(--panel);
+  }
+  .dialog-header h2 { margin: .3rem 0; line-height: 1.2; font-size: clamp(1.2rem, 4vw, 1.65rem); overflow-wrap: anywhere; }
+  .close { background: transparent; border-color: var(--line); color: var(--text); }
+  .close:hover { background: #303a2f; }
+  .dialog-body { padding: 1rem clamp(.9rem, 4vw, 1.65rem) 1.5rem; }
+  .player { position: relative; isolation: isolate; background: #090b09; border-radius: .5rem; overflow: hidden; }
+  .player video { display: block; width: 100%; aspect-ratio: 16 / 9; max-height: 55vh; }
+  .static { position: absolute; inset: 0 0 3rem; width: 100%; height: calc(100% - 3rem); pointer-events: none; opacity: .4; }
+  .details { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 8rem), 1fr)); gap: .75rem 1rem; margin: 1rem 0 1.5rem; }
+  .details dt { color: var(--muted); font-size: .8rem; }
+  .details dd { margin: .2rem 0 0; overflow-wrap: anywhere; }
+  .comments { border-top: 1px solid var(--line); padding-top: 1rem; }
+  .comments h3 { margin: 0 0 .6rem; }
+  .comments ol { margin: 0; padding: 0; list-style: none; }
+  .comment { padding: .75rem 0; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+  .comment.reply { margin-left: .8rem; padding-left: .85rem; border-left: 2px solid var(--line); }
+  .comment p { margin: .35rem 0 0; white-space: pre-wrap; }
+  .comment-date { margin-left: .6rem; color: var(--muted); font-size: .85rem; }
+  @media (max-width: 43rem) {
+    .toolbar { display: flex; }
+    .column-header { display: none; }
+    .upload { grid-template-columns: clamp(3rem, 22vw, 6rem) repeat(2, minmax(0, 1fr)); gap: .35rem .7rem; }
+    .thumbnail { grid-row: span 3; align-self: start; }
+    .title-group { grid-column: span 2; }
+    .upload-date { grid-column: 2; }
+  }
+</style>
+<header class="hero">
+  <div class="shell hero-inner">
+    <div>
+      <h1>Vbox7 Archive</h1>
+      <p class="status" id="status" role="status">Choose an archive folder to browse your uploads.</p>
+    </div>
+    <button class="button" id="open-folder" type="button">Open archive folder</button>
+    <input id="folder" type="file" webkitdirectory multiple hidden>
+  </div>
+</header>
+<main class="shell">
+  <p class="notice" id="error" role="alert" hidden></p>
+  <p class="notice" id="scan-warning" hidden>The listing scan was incomplete. Some uploads may be missing.</p>
+  <p class="empty" id="empty" hidden>No uploads were found in this archive.</p>
+  <div class="toolbar" id="toolbar" hidden>
+    <label for="sort-uploads">Sort by</label>
+    <select id="sort-uploads">
+      <option value="">Archive order</option>
+      <option value="title:asc">Title, A to Z</option>
+      <option value="title:desc">Title, Z to A</option>
+      <option value="date:desc">Date, newest first</option>
+      <option value="date:asc">Date, oldest first</option>
+      <option value="views:desc">Most views</option>
+      <option value="views:asc">Fewest views</option>
+      <option value="comments:desc">Most comments</option>
+      <option value="comments:asc">Fewest comments</option>
+    </select>
+  </div>
+  <div class="column-header" id="column-header" role="group" aria-label="Sort uploads by column" hidden>
+    <span>Preview</span>
+    <button type="button" data-sort="title" data-first-direction="asc">Title<span class="sort-indicator" aria-hidden="true"></span></button>
+    <button type="button" data-sort="date" data-first-direction="desc">Upload date<span class="sort-indicator" aria-hidden="true"></span></button>
+    <button type="button" data-sort="views" data-first-direction="desc">Views<span class="sort-indicator" aria-hidden="true"></span></button>
+    <button type="button" data-sort="comments" data-first-direction="desc">Comments<span class="sort-indicator" aria-hidden="true"></span></button>
+  </div>
+  <ul class="uploads" id="uploads" aria-label="Archived uploads"></ul>
+</main>
+<dialog id="video-dialog" aria-labelledby="video-title">
+  <header class="dialog-header">
+    <h2 id="video-title"></h2>
+    <form method="dialog"><button class="button close" aria-label="Close video" autofocus>Close</button></form>
+  </header>
+  <div class="dialog-body" id="video-details"></div>
+</dialog>
+<script>
+  "use strict";
+
+  const folder = document.querySelector("#folder");
+  const openFolder = document.querySelector("#open-folder");
+  const status = document.querySelector("#status");
+  const error = document.querySelector("#error");
+  const scanWarning = document.querySelector("#scan-warning");
+  const emptyArchive = document.querySelector("#empty");
+  const toolbar = document.querySelector("#toolbar");
+  const sortOrder = document.querySelector("#sort-uploads");
+  const columnHeader = document.querySelector("#column-header");
+  const sortButtons = columnHeader.querySelectorAll("button");
+  const uploads = document.querySelector("#uploads");
+  const dialog = document.querySelector("#video-dialog");
+  const dialogTitle = document.querySelector("#video-title");
+  const dialogBody = document.querySelector("#video-details");
+  const numberFormat = new Intl.NumberFormat("en");
+  const dateFormat = new Intl.DateTimeFormat("en", {dateStyle: "medium", timeZone: "UTC"});
+  const titleOrder = new Intl.Collator(undefined, {numeric: true, sensitivity: "base"});
+  const visibilities = new Map([["private", "Private"], ["friends", "Friends only"], ["public", "Public"]]);
+  let mediaUrls = [];
+  let archiveRows = [];
+  let stopPreviews = () => {};
+
+  function element(tag, className, text) {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text != null) node.textContent = text;
+    return node;
+  }
+
+  function isRecord(value) {
+    return value !== null && typeof value === "object" && !Array.isArray(value);
+  }
+
+  function uploadTitle(id, upload) {
+    return typeof upload.title === "string" && upload.title.trim() ? upload.title : id;
+  }
+
+  function uploadDateValue(value) {
+    return typeof value === "string" ? Date.parse(value.slice(0, 10)) : NaN;
+  }
+
+  function uploadDate(value) {
+    const date = uploadDateValue(value);
+    return Number.isFinite(date) ? dateFormat.format(date) : "Date unavailable";
+  }
+
+  function countLabel(value, singular, plural) {
+    return Number.isFinite(value) && value >= 0
+      ? `${numberFormat.format(value)} ${value === 1 ? singular : plural}`
+      : `${singular[0].toUpperCase() + singular.slice(1)} count unavailable`;
+  }
+
+  function mediaUrl(source) {
+    if (typeof source === "string") return source;
+    const url = URL.createObjectURL(source);
+    mediaUrls.push(url);
+    return url;
+  }
+
+  function loadPreview(source, signal) {
+    return new Promise(resolve => {
+      const video = element("video");
+      const fromFilePicker = typeof source !== "string";
+      const url = fromFilePicker ? URL.createObjectURL(source) : source;
+      video.preload = "auto";
+      video.muted = true;
+      const timeout = setTimeout(finish, 5000);
+
+      function finish(canvas) {
+        clearTimeout(timeout);
+        signal.removeEventListener("abort", failed);
+        video.removeEventListener("loadeddata", capture);
+        video.removeEventListener("error", failed);
+        video.removeAttribute("src");
+        video.load();
+        if (fromFilePicker) URL.revokeObjectURL(url);
+        resolve(canvas);
+      }
+
+      function failed() {
+        finish();
+      }
+
+      function capture() {
+        if (!video.videoWidth || !video.videoHeight) return finish();
+        const canvas = element("canvas");
+        canvas.width = 192;
+        canvas.height = 108;
+        const context = canvas.getContext("2d");
+        if (!context) return finish();
+        const scale = Math.min(canvas.width / video.videoWidth, canvas.height / video.videoHeight);
+        const width = video.videoWidth * scale;
+        const height = video.videoHeight * scale;
+        // Draw in place so previews also work when Chrome treats a local video as cross-origin.
+        try {
+          context.drawImage(video, (canvas.width - width) / 2, (canvas.height - height) / 2, width, height);
+        } catch {
+          return finish();
+        }
+        finish(canvas);
+      }
+
+      signal.addEventListener("abort", failed, {once: true});
+      video.addEventListener("loadeddata", capture, {once: true});
+      video.addEventListener("error", failed, {once: true});
+      video.src = url;
+    });
+  }
+
+  function observePreviews(previews) {
+    const controller = new AbortController();
+    const pending = new Set();
+    let loading = false;
+    const observer = new IntersectionObserver(async entries => {
+      if (controller.signal.aborted) return;
+      for (const entry of entries) {
+        if (entry.isIntersecting && previews.has(entry.target)) pending.add(entry.target);
+        else pending.delete(entry.target);
+      }
+      if (loading) return;
+      loading = true;
+      for (const thumbnail of pending) {
+        pending.delete(thumbnail);
+        observer.unobserve(thumbnail);
+        const source = previews.get(thumbnail);
+        previews.delete(thumbnail);
+        const canvas = await loadPreview(source, controller.signal);
+        if (canvas && !controller.signal.aborted) thumbnail.append(canvas);
+      }
+      loading = false;
+    }, {rootMargin: "150px"});
+    for (const thumbnail of previews.keys()) observer.observe(thumbnail);
+    return () => {
+      pending.clear();
+      observer.disconnect();
+      controller.abort();
+    };
+  }
+
+  function clearDialog() {
+    const player = dialogBody.querySelector("video");
+    if (player) {
+      player.pause();
+      player.removeAttribute("src");
+      player.load();
+    }
+    dialogBody.replaceChildren();
+    for (const url of mediaUrls) URL.revokeObjectURL(url);
+    mediaUrls = [];
+  }
+
+  function renderComments(upload) {
+    const section = element("section", "comments");
+    const comments = Array.isArray(upload.comments) ? upload.comments.filter(isRecord) : [];
+    section.append(element("h3", "", countLabel(comments.length, "saved comment", "saved comments")));
+    if (!comments.length) {
+      if (upload.comment_count !== 0) section.append(element("p", "", "Comment text is unavailable."));
+      return section;
+    }
+    const list = element("ol");
+    for (const comment of comments) {
+      const item = element("li", comment.parent_id ? "comment reply" : "comment");
+      item.append(element("strong", "", comment.author || "Unknown author"));
+      if (comment.date_display) item.append(element("span", "comment-date", comment.date_display));
+      item.append(element("p", "", comment.text));
+      list.append(item);
+    }
+    section.append(list);
+    return section;
+  }
+
+  function showUpload(id, upload, findMedia) {
+    clearDialog();
+    dialogTitle.textContent = uploadTitle(id, upload);
+    const file = findMedia(upload.video_file);
+    if (upload.video_is_placeholder === true) {
+      dialogBody.append(element("p", "notice", "Original video unavailable. A placeholder was saved."));
+    }
+    if (file) {
+      const player = element("div", "player");
+      const video = element("video");
+      video.controls = true;
+      video.playsInline = true;
+      video.preload = "metadata";
+      video.setAttribute("aria-label", dialogTitle.textContent);
+      const playbackError = element("p", "notice", "The saved video could not be opened. The file may be missing or unsupported by this browser.");
+      playbackError.hidden = true;
+      video.addEventListener("error", () => { playbackError.hidden = false; });
+      video.src = mediaUrl(file);
+      player.append(video);
+      const overlay = findMedia(upload.placeholder_static_file);
+      if (upload.video_is_placeholder === true && overlay) {
+        const image = element("img", "static");
+        image.alt = "";
+        image.src = mediaUrl(overlay);
+        player.append(image);
+      }
+      dialogBody.append(player, playbackError);
+    } else {
+      dialogBody.append(element("p", "notice", "No local video file was found for this upload."));
+    }
+
+    const details = element("dl", "details");
+    for (const [label, value] of [
+      ["Upload date", uploadDate(upload.upload_date)],
+      ["Uploader", upload.author || "Unknown uploader"],
+      ["Visibility", visibilities.get(upload.visibility) || "Unknown visibility"],
+      ["Views", Number.isFinite(upload.view_count) ? numberFormat.format(upload.view_count) : "Unavailable"],
+      ["Comment count", Number.isFinite(upload.comment_count) ? numberFormat.format(upload.comment_count) : "Unavailable"],
+      ["Video ID", id],
+    ]) {
+      const group = element("div");
+      group.append(element("dt", "", label), element("dd", "", value));
+      details.append(group);
+    }
+    dialogBody.append(details, renderComments(upload));
+    dialog.showModal();
+    dialog.scrollTop = 0;
+  }
+
+  function nextSortDirection(button, field, direction) {
+    const first = button.dataset.firstDirection;
+    if (button.dataset.sort !== field) return first;
+    if (direction !== first) return "";
+    return first === "asc" ? "desc" : "asc";
+  }
+
+  function orderUploads() {
+    const [field, direction] = sortOrder.value.split(":");
+    const rows = archiveRows.slice();
+    if (field) {
+      rows.sort((first, second) => {
+        const a = first[field];
+        const b = second[field];
+        if (a == null) return b == null ? 0 : 1;
+        if (b == null) return -1;
+        const comparison = field === "title" ? titleOrder.compare(a, b) : a - b;
+        return direction === "asc" ? comparison : -comparison;
+      });
+    }
+    const list = document.createDocumentFragment();
+    for (const row of rows) list.append(row.item);
+    uploads.replaceChildren(list);
+
+    for (const button of sortButtons) {
+      const active = button.dataset.sort === field;
+      const next = nextSortDirection(button, field, direction);
+      const action = next ? `Sort ${next === "asc" ? "ascending" : "descending"}.` : "Restore archive order.";
+      const current = active ? `Sorted ${direction === "asc" ? "ascending" : "descending"}. ` : "";
+      button.setAttribute("aria-pressed", String(active));
+      button.setAttribute("aria-description", current + action);
+      button.querySelector(".sort-indicator").textContent = active ? (direction === "asc" ? "↑" : "↓") : "↕";
+    }
+  }
+
+  function renderArchive(catalog, findMedia) {
+    if (!isRecord(catalog) || typeof catalog.username !== "string" || !isRecord(catalog.uploads)) {
+      throw new Error("The file does not contain a valid Vbox7 upload catalog.");
+    }
+    const entries = Object.entries(catalog.uploads);
+    if (entries.some(([, upload]) => !isRecord(upload))) {
+      throw new Error("The archive catalog contains an invalid upload entry.");
+    }
+    stopPreviews();
+    const previews = new Map();
+    archiveRows = [];
+    for (const [index, [id, upload]] of entries.entries()) {
+      const source = findMedia(upload.video_file);
+      const hasVideo = Boolean(source);
+      const item = element("li");
+      const card = element("button", "upload");
+      card.type = "button";
+      const thumbnail = element("span", hasVideo ? "thumbnail play" : "thumbnail", hasVideo ? "" : "–");
+      thumbnail.setAttribute("aria-hidden", "true");
+      if (hasVideo && upload.video_is_placeholder !== true) previews.set(thumbnail, source);
+      const titleGroup = element("span", "title-group");
+      const title = element("span", "upload-title", uploadTitle(id, upload));
+      title.id = `upload-title-${index}`;
+      titleGroup.append(title);
+      if (upload.video_is_placeholder === true) {
+        titleGroup.append(element("span", "video-status", "Placeholder"));
+      }
+      if (!hasVideo) titleGroup.append(element("span", "video-status", "File unavailable"));
+      card.setAttribute("aria-labelledby", title.id);
+      card.append(thumbnail, titleGroup,
+        element("span", "upload-date", uploadDate(upload.upload_date)),
+        element("span", "metric", countLabel(upload.view_count, "view", "views")),
+        element("span", "metric", countLabel(upload.comment_count, "comment", "comments")));
+      const visibility = visibilities.get(upload.visibility);
+      if (visibility) titleGroup.append(element("span", "video-status visibility", visibility));
+      card.addEventListener("click", () => showUpload(id, upload, findMedia));
+      item.append(card);
+      const date = uploadDateValue(upload.upload_date);
+      archiveRows.push({
+        item,
+        title: title.textContent,
+        date: Number.isFinite(date) ? date : null,
+        views: Number.isFinite(upload.view_count) && upload.view_count >= 0 ? upload.view_count : null,
+        comments: Number.isFinite(upload.comment_count) && upload.comment_count >= 0 ? upload.comment_count : null,
+      });
+    }
+    orderUploads();
+    stopPreviews = observePreviews(previews);
+    toolbar.hidden = entries.length === 0;
+    columnHeader.hidden = entries.length === 0;
+    status.textContent = `${catalog.username} · ${countLabel(entries.length, "upload", "uploads")}`;
+    scanWarning.hidden = catalog.scan_complete !== false;
+    emptyArchive.hidden = entries.length !== 0;
+  }
+
+  openFolder.addEventListener("click", () => folder.click());
+  sortOrder.addEventListener("change", orderUploads);
+  for (const button of sortButtons) {
+    button.addEventListener("click", () => {
+      const [field, direction] = sortOrder.value.split(":");
+      const next = nextSortDirection(button, field, direction);
+      sortOrder.value = next ? `${button.dataset.sort}:${next}` : "";
+      orderUploads();
+    });
+  }
+  dialog.addEventListener("close", () => {
+    if (!dialog.open) clearDialog();
+  });
+
+  folder.addEventListener("change", async () => {
+    const files = new Map();
+    for (const file of folder.files) {
+      const relativePath = file.webkitRelativePath;
+      const separator = relativePath.indexOf("/");
+      if (separator !== -1) files.set(relativePath.slice(separator + 1), file);
+    }
+    folder.value = "";
+    if (!files.size) return;
+    openFolder.disabled = true;
+    error.hidden = true;
+    try {
+      const metadata = files.get("misc/metadata.json");
+      if (!metadata) throw new Error("Choose the archive folder that contains misc/metadata.json.");
+      let catalog;
+      try {
+        catalog = JSON.parse(await metadata.text());
+      } catch {
+        throw new Error("Could not read misc/metadata.json. Check that it is a valid archive catalog.");
+      }
+      const videos = new Map([...files].filter(([path]) => path.startsWith("videos/")));
+      renderArchive(catalog, path => videos.get(path));
+    } catch (problem) {
+      error.textContent = problem.message;
+      error.hidden = false;
+    } finally {
+      openFolder.disabled = false;
+    }
+  });
+</script>
+<script src="misc/viewer-data.js"></script>
+<script>
+  if (globalThis.vbox7ViewerCatalog !== undefined) {
+    try {
+      renderArchive(globalThis.vbox7ViewerCatalog, path => {
+        const fileName = typeof path === "string" ? /^videos\/([^/\\:]+)$/.exec(path)?.[1] : null;
+        return fileName && fileName !== "." && fileName !== ".."
+          ? `videos/${encodeURIComponent(fileName)}`
+          : null;
+      });
+    } catch (problem) {
+      error.textContent = problem.message;
+      error.hidden = false;
+    }
+  }
+</script>

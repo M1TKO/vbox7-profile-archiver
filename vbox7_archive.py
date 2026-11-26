@@ -19,7 +19,7 @@ import requests
 
 from vbox7_storage import (
     ArchiveError, VIDEO_EXTENSIONS, archive_lock, existing_video, is_placeholder,
-    load_catalog, save_json, staged_file, valid_static, valid_video, video_header_valid,
+    load_catalog, save_json, save_viewer_data, staged_file, valid_static, valid_video, video_header_valid,
 )
 
 
@@ -142,7 +142,7 @@ def parse_video(html):
     title = info.get("name")
     return {
         "title": (title if isinstance(title, str) else None) or text_at(soup, ".video-info h1"),
-        "author": text_at(soup, ".video-info .channel-name"),
+        "author": text_at(soup, ".video-info .channel-name") or None,
         "upload_date": upload_date(info.get("uploadDate") or text_at(soup, ".video-stat svg.time + span")),
         "view_count": views if views is not None else number(text_at(soup, ".video-stat svg.views + span")),
         "comment_count": count if count is not None else number(text_at(soup, ".comments-btn .num")),
@@ -572,7 +572,15 @@ def run(args):
     index = args.output / "misc" / "metadata.json"
     if args.dry_run:
         return run_archive(args, video_dir, index)
+    refresh_viewer = getattr(args, "refresh_viewer", False)
+    if refresh_viewer and not index.is_file():
+        raise ArchiveError(f"No archive catalog was found at {index}.")
     with archive_lock(index.parent):
+        if refresh_viewer:
+            viewer_data = index.with_name("viewer-data.js")
+            save_viewer_data(viewer_data, load_catalog(index, args.username))
+            print(f"Viewer data refreshed: {viewer_data}")
+            return 0
         video_dir.mkdir(parents=True, exist_ok=True)
         return run_archive(args, video_dir, index)
 
@@ -599,6 +607,13 @@ def run_archive(args, video_dir, index):
             return process_archive(args, context, http, catalog, video_dir, index)
 
 
+def fill_missing_authors(catalog):
+    for record in catalog["uploads"].values():
+        author = record.get("author")
+        if not isinstance(author, str) or not author.strip():
+            record["author"] = catalog["username"]
+
+
 def process_archive(args, context, http, catalog, video_dir, index):
     records = catalog["uploads"]
     work = {}
@@ -615,7 +630,6 @@ def process_archive(args, context, http, catalog, video_dir, index):
                     continue
                 record = records.setdefault(video_id, {"comments": [], "comment_count": None})
                 record.update({key: value for key, value in upload.items() if value is not None})
-                record["author"] = record.get("author") or catalog["username"]
                 previous_visibility = record.get("visibility")
                 if not isinstance(previous_visibility, str) or previous_visibility not in listing_errors:
                     record["visibility"] = visibility
@@ -635,6 +649,7 @@ def process_archive(args, context, http, catalog, video_dir, index):
             print("The upload scan was incomplete. Counts reflect the uploads found so far.")
         return int(bool(listing_errors))
 
+    fill_missing_authors(catalog)
     catalog.update({"listing_errors": listing_errors, "scan_complete": not listing_errors,
                     "last_run_limit": args.limit})
     save_json(index, catalog)
@@ -653,6 +668,7 @@ def process_archive(args, context, http, catalog, video_dir, index):
                 print(f"  Review: {', '.join(record['errors'])}", flush=True)
     placeholders = sum(bool(r.get("video_is_placeholder")) for r in selected)
     videos = sum(bool(r["video_file"]) for r in selected) - placeholders
+    save_viewer_data(index.with_name("viewer-data.js"), catalog)
     print(f"Videos saved: {videos}/{len(selected)}. Placeholders saved: {placeholders}. "
           f"Entries to review: {flagged}. Index: {index}", flush=True)
     return int(bool(flagged or listing_errors))
@@ -666,8 +682,11 @@ def main():
     parser.add_argument("--browser", choices=("chrome",),
                         help="optional for compatibility. The script always uses Google Chrome.")
     parser.add_argument("--limit", type=int, help="process at most this many uploads, private first")
-    parser.add_argument("--dry-run", action="store_true",
-                        help="show upload and planned download counts without writing archive files")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--dry-run", action="store_true",
+                      help="show upload and planned download counts without writing archive files")
+    mode.add_argument("--refresh-viewer", action="store_true",
+                      help="refresh offline viewer data from an existing archive without signing in")
     parser.add_argument("--retry-placeholders", action="store_true",
                         help="check whether saved placeholders can be replaced with original videos")
     args = parser.parse_args()

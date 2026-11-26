@@ -3,10 +3,13 @@
 ## Project workflow
 
 - `vbox7_archive.py` is the Python CLI entry point. It uses Playwright to open local Google Chrome for manual sign-in, then verifies the signed-in owner before scanning. `vbox7_storage.py` manages filesystem writes and validation.
+- `archive-viewer.html` is the standalone read-only viewer. It automatically loads the generated `misc/viewer-data.js` beside the page and can also read `misc/metadata.json` from a user-selected folder. Keep viewer data local and ignored by Git, and preserve support for existing catalogs, placeholders, and missing media.
 - Follow the setup in `README.md` and install dependencies from `requirements.txt`. Maintain compatibility with Python 3.9 or newer and the documented Windows, macOS, and Linux commands.
 - Preserve private, friends-only, then public discovery order and keep the first visibility for duplicate IDs. `--limit` applies to processing after discovery. Preserve already recognized uploads when a listing scan is incomplete.
 - Keep `--dry-run` read-only. It uses the normal sign-in, discovery, selection, and saved-video checks to count planned downloads. Report incomplete listing scans with a nonzero exit status.
 - Preserve resume behavior when changing archive storage. Reuse validated final video files in `videos/`, check account ownership of the catalog, and atomically update `misc/metadata.json` as the run progresses. Hold the output lock throughout a write run. Keep existing archives readable when changing the catalog format.
+- Generate `misc/viewer-data.js` atomically under the output lock at the end of an archive run or with `--refresh-viewer`. Keep `misc/metadata.json` as the canonical catalog.
+- On archive runs, fill missing or blank upload authors in the catalog with the account username. Save a nonblank uploader from the video page when available and preserve saved authors when the page omits the uploader.
 - Keep per-video download progress based on bytes received. Show a percentage when the server provides the total size, and report completion only after the video is saved to its final path.
 - Save Vbox7's placeholder MP4 and static GIF only when the signed-in player explicitly returns `src: "blank"`. Preserve the upload's metadata, mark placeholder videos with `video_is_placeholder`, and count them separately from original videos.
 - `--retry-placeholders` checks for original videos and keeps existing placeholders until a validated original is saved. Dry run counts the same planned attempts. Preserve previously saved comments when a refresh is incomplete.
@@ -16,6 +19,7 @@
 
 - Use the project virtual environment to run `python -m py_compile vbox7_archive.py vbox7_storage.py` for a syntax check, `python vbox7_archive.py --help` for a CLI smoke check, and `python -m unittest discover -s tests -v` for offline regression checks.
 - For a live smoke check, follow the one-upload example in `README.md` with an authorized account and a separate `--output` directory.
+- For viewer changes, open the page directly in Chrome beside a synthetic archive with generated viewer data, then exercise the folder picker. Check lazy video previews, sorting, playback, saved comments, placeholder and missing-media states, and keyboard dismissal.
 
 ## Keep these instructions current
 
