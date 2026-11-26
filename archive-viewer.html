@@ -33,6 +33,7 @@
   .hero-inner { display: flex; align-items: end; justify-content: space-between; gap: 1.5rem; flex-wrap: wrap; }
   h1 { margin: 0; font-size: clamp(2.3rem, 6vw, 4.5rem); letter-spacing: -.065em; line-height: 1; }
   .status { margin: .85rem 0 0; min-height: 1.5em; color: var(--muted); overflow-wrap: anywhere; }
+  .archive-folder { margin: .25rem 0 0; color: var(--muted); font-size: .875rem; overflow-wrap: anywhere; }
   .button {
     min-height: 2.75rem;
     border: 1px solid transparent;
@@ -208,6 +209,7 @@
     <div>
       <h1>Vbox7 Archive</h1>
       <p class="status" id="status" role="status">Choose an archive folder to browse your uploads.</p>
+      <p class="archive-folder" id="archive-folder" hidden></p>
     </div>
     <button class="button" id="open-folder" type="button">Open archive folder</button>
     <input id="folder" type="file" webkitdirectory multiple hidden>
@@ -259,6 +261,7 @@
   const folder = document.querySelector("#folder");
   const openFolder = document.querySelector("#open-folder");
   const status = document.querySelector("#status");
+  const archiveFolder = document.querySelector("#archive-folder");
   const error = document.querySelector("#error");
   const scanWarning = document.querySelector("#scan-warning");
   const emptyArchive = document.querySelector("#empty");
@@ -530,7 +533,7 @@
     }
   }
 
-  function renderArchive(catalog, findMedia) {
+  function renderArchive(catalog, folderName, findMedia) {
     if (!isRecord(catalog) || typeof catalog.username !== "string" || !isRecord(catalog.uploads)) {
       throw new Error("The file does not contain a valid Vbox7 upload catalog.");
     }
@@ -585,11 +588,107 @@
     stopPreviews = observePreviews(previews);
     toolbar.hidden = entries.length === 0;
     status.textContent = `${catalog.username} · ${countLabel(entries.length, "upload", "uploads")}`;
+    archiveFolder.textContent = `Folder: ${folderName}`;
+    archiveFolder.hidden = false;
     scanWarning.hidden = catalog.scan_complete !== false;
     emptyArchive.hidden = entries.length !== 0;
   }
 
-  openFolder.addEventListener("click", () => folder.click());
+  function rememberedFolder(mode, directory) {
+    return new Promise((resolve, reject) => {
+      const key = location.pathname;
+      const request = indexedDB.open("vbox7-archive-viewer", 1);
+      request.onupgradeneeded = () => request.result.createObjectStore("folders");
+      request.onerror = () => reject(request.error);
+      request.onsuccess = () => {
+        const db = request.result;
+        try {
+          const transaction = db.transaction("folders", mode);
+          const store = transaction.objectStore("folders");
+          const operation = mode === "readonly" ? store.get(key)
+            : directory ? store.put(directory, key) : store.delete(key);
+          transaction.oncomplete = () => resolve(operation.result);
+          transaction.onabort = () => reject(transaction.error);
+        } catch (problem) {
+          reject(problem);
+        } finally {
+          db.close();
+        }
+      };
+    });
+  }
+
+  function showError(problem) {
+    error.textContent = problem.message;
+    error.hidden = false;
+  }
+
+  async function readCatalog(metadata) {
+    try {
+      return JSON.parse(await metadata.text());
+    } catch {
+      throw new Error("Could not read misc/metadata.json. Check that it is a valid archive catalog.");
+    }
+  }
+
+  async function fileInDirectory(directory, path) {
+    const parts = path.split("/");
+    const name = parts.pop();
+    if ([...parts, name].some(part => !part || part === "." || part === ".." || /[\\:]/.test(part))) {
+      return null;
+    }
+    try {
+      for (const part of parts) directory = await directory.getDirectoryHandle(part);
+      return await (await directory.getFileHandle(name)).getFile();
+    } catch (problem) {
+      if (problem.name === "NotFoundError" || problem.name === "TypeMismatchError") return null;
+      throw problem;
+    }
+  }
+
+  async function openDirectory(directory) {
+    const metadata = await fileInDirectory(directory, "misc/metadata.json");
+    if (!metadata) throw new Error("Choose the archive folder that contains misc/metadata.json.");
+    const catalog = await readCatalog(metadata);
+    const paths = new Set();
+    for (const upload of Object.values(catalog?.uploads ?? {})) {
+      for (const path of [upload?.video_file, upload?.placeholder_static_file]) {
+        if (typeof path === "string" && path.startsWith("videos/")) paths.add(path);
+      }
+    }
+    const videos = new Map(await Promise.all([...paths].map(async path =>
+      [path, await fileInDirectory(directory, path)]
+    )));
+    renderArchive(catalog, directory.name, path => videos.get(path));
+  }
+
+  openFolder.addEventListener("click", async () => {
+    if (typeof window.showDirectoryPicker !== "function") {
+      folder.click();
+      return;
+    }
+    openFolder.disabled = true;
+    error.hidden = true;
+    try {
+      let directory;
+      try {
+        directory = await window.showDirectoryPicker({id: "vbox7-archive", mode: "read"});
+      } catch (problem) {
+        if (problem.name === "SecurityError") {
+          folder.click();
+          return;
+        }
+        if (problem.name === "AbortError") return;
+        throw problem;
+      }
+      await openDirectory(directory);
+      await rememberedFolder("readwrite", directory).catch(() => {});
+    } catch (problem) {
+      showError(problem);
+    } finally {
+      openFolder.disabled = false;
+    }
+  });
   hideUnavailable.addEventListener("change", updateUploadList);
   sortOrder.addEventListener("change", updateUploadList);
   for (const button of sortButtons) {
@@ -618,17 +717,13 @@
     try {
       const metadata = files.get("misc/metadata.json");
       if (!metadata) throw new Error("Choose the archive folder that contains misc/metadata.json.");
-      let catalog;
-      try {
-        catalog = JSON.parse(await metadata.text());
-      } catch {
-        throw new Error("Could not read misc/metadata.json. Check that it is a valid archive catalog.");
-      }
+      const catalog = await readCatalog(metadata);
       const videos = new Map([...files].filter(([path]) => path.startsWith("videos/")));
-      renderArchive(catalog, path => videos.get(path));
+      const folderName = metadata.webkitRelativePath.split("/")[0];
+      renderArchive(catalog, folderName, path => videos.get(path));
+      await rememberedFolder("readwrite").catch(() => {});
     } catch (problem) {
-      error.textContent = problem.message;
-      error.hidden = false;
+      showError(problem);
     } finally {
       openFolder.disabled = false;
     }
@@ -636,17 +731,49 @@
 </script>
 <script src="misc/viewer-data.js"></script>
 <script>
-  if (globalThis.vbox7ViewerCatalog !== undefined) {
+  function adjacentFolderPath() {
+    const folder = new URL(".", location.href);
+    if (folder.protocol !== "file:") return "Beside this viewer";
+    let path = folder.pathname;
     try {
-      renderArchive(globalThis.vbox7ViewerCatalog, path => {
-        const fileName = typeof path === "string" ? /^videos\/([^/\\:]+)$/.exec(path)?.[1] : null;
-        return fileName && fileName !== "." && fileName !== ".."
-          ? `videos/${encodeURIComponent(fileName)}`
-          : null;
-      });
+      path = decodeURIComponent(path);
+    } catch {
+      // Keep the URL path if it contains an invalid escape sequence.
+    }
+    const windowsDrive = /^\/[a-z]:\//i.test(path);
+    if (path !== "/" && !(windowsDrive && path.length === 4)) path = path.slice(0, -1);
+    if (folder.hostname) return "\\\\" + folder.hostname + path.replaceAll("/", "\\");
+    if (windowsDrive) return path.slice(1).replaceAll("/", "\\");
+    return path;
+  }
+
+  async function loadInitialArchive() {
+    openFolder.disabled = true;
+    try {
+      if (typeof window.showDirectoryPicker === "function") {
+        try {
+          const directory = await rememberedFolder("readonly");
+          if (directory && await directory.queryPermission({mode: "read"}) === "granted") {
+            await openDirectory(directory);
+            return;
+          }
+        } catch {
+          // An inaccessible saved archive should fall back to the catalog beside the viewer.
+        }
+      }
+      if (globalThis.vbox7ViewerCatalog !== undefined) {
+        renderArchive(globalThis.vbox7ViewerCatalog, adjacentFolderPath(), path => {
+          const fileName = typeof path === "string" ? /^videos\/([^/\\:]+)$/.exec(path)?.[1] : null;
+          return fileName && fileName !== "." && fileName !== ".."
+            ? `videos/${encodeURIComponent(fileName)}`
+            : null;
+        });
+      }
     } catch (problem) {
-      error.textContent = problem.message;
-      error.hidden = false;
+      showError(problem);
+    } finally {
+      openFolder.disabled = false;
     }
   }
+  loadInitialArchive();
 </script>

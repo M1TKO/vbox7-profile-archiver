@@ -89,9 +89,11 @@ The archive can contain private videos and comments. Git ignores generated conte
 
 ## Browse an archive offline
 
-Open [archive-viewer.html](archive-viewer.html) from your local checkout in Chrome. It automatically opens the archive beside the page when `misc/viewer-data.js` is present. Reload the page after an archive run to see the updated catalog.
+Open [archive-viewer.html](archive-viewer.html) from your local checkout in Chrome. On reload, the viewer reopens the last folder selected with **Open archive folder** if Chrome still has read access. If that folder is missing or inaccessible, it loads the archive beside the HTML file when `misc/viewer-data.js` is present. Reload the page after an archive run to see the updated catalog.
 
-Click **Open archive folder** to browse a custom `--output` folder or an older archive. You can also copy the HTML file into a custom output folder to give it the same automatic loading behavior. Select an upload to open its local video, details, and saved comments. The viewer marks placeholders and keeps details available when a video file is missing.
+The viewer header shows the full folder path when the archive loads beside the local HTML file. For a folder opened through the browser picker, it shows the folder name.
+
+Click **Open archive folder** to browse a custom `--output` folder or an older archive. If Chrome no longer has access, select the folder again. Browsers that use the basic folder picker can open folders for the current page only. You can also copy the HTML file into a custom output folder to give it the same automatic loading behavior. Select an upload to open its local video, details, and saved comments. The viewer marks placeholders and keeps details available when a video file is missing.
 
 Use **Open on Vbox7** in the upload list or video details to open the original Vbox7 page in a new tab.
 
