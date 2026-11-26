@@ -19,7 +19,7 @@
 
 - Use the project virtual environment to run `python -m py_compile vbox7_archive.py vbox7_storage.py` for a syntax check, `python vbox7_archive.py --help` for a CLI smoke check, and `python -m unittest discover -s tests -v` for offline regression checks.
 - For a live smoke check, follow the one-upload example in `README.md` with an authorized account and a separate `--output` directory.
-- For viewer changes, open the page directly in Chrome beside a synthetic archive with generated viewer data, then exercise the folder picker. Check lazy video previews, sorting, playback, saved comments, placeholder and missing-media states, and keyboard dismissal.
+- For viewer changes, open the page directly in Chrome beside a synthetic archive with generated viewer data, then exercise the folder picker. Check lazy video previews, sorting, playback, saved comments, placeholder and missing-media states, and keyboard dismissal. Verify that **Open on Vbox7** opens the upload's page in a new tab from the list and video details, including for uploads without local media.
 
 ## Keep these instructions current
 

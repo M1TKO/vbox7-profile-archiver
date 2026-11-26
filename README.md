@@ -93,6 +93,8 @@ Open [archive-viewer.html](archive-viewer.html) from your local checkout in Chro
 
 Click **Open archive folder** to browse a custom `--output` folder or an older archive. You can also copy the HTML file into a custom output folder to give it the same automatic loading behavior. Select an upload to open its local video, details, and saved comments. The viewer marks placeholders and keeps details available when a video file is missing.
 
+Use **Open on Vbox7** in the upload list or video details to open the original Vbox7 page in a new tab.
+
 The upload list shows still-frame previews from supported local videos as you scroll. Click a column heading to sort by title, upload date, views, or comments. Click the same heading again to reverse the sort, and a third time to restore archive order. On narrow screens, use the **Sort by** menu.
 
 Normal archive runs generate the viewer data at the end. To enable automatic loading for an existing archive or refresh the viewer after an interrupted run, use the following command from the project virtual environment. Add `--output PATH` if needed.
@@ -101,7 +103,7 @@ Normal archive runs generate the viewer data at the end. To enable automatic loa
 python vbox7_archive.py YOUR_USERNAME --refresh-viewer
 ```
 
-The viewer runs entirely in your browser and reads local files. It works offline without a server or a Vbox7 sign-in.
+The viewer runs entirely in your browser and reads local files. Browsing the archive works offline without a server or a Vbox7 sign-in.
 
 ## Check or resume an archive
 

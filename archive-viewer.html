@@ -22,7 +22,7 @@
   [hidden] { display: none !important; }
   body { margin: 0; }
   button { font: inherit; cursor: pointer; }
-  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
+  :is(button, a):focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
   button:disabled { cursor: wait; opacity: .7; }
   .shell { width: min(100% - 2.5rem, 70rem); margin-inline: auto; }
   .hero {
@@ -44,7 +44,7 @@
   }
   .button:hover { background: #eef8ba; }
   main {
-    --upload-columns: 7.5rem minmax(0, 1fr) minmax(6.5rem, .36fr) minmax(5.75rem, .25fr) minmax(5.75rem, .25fr);
+    --upload-columns: 7.5rem minmax(0, 1fr) minmax(6.5rem, .36fr) minmax(5.75rem, .25fr) minmax(5.75rem, .25fr) 8rem;
     margin-block: 1.5rem 3rem;
   }
   .notice { color: var(--warning); margin: 0 0 1rem; }
@@ -62,7 +62,7 @@
   }
   .toolbar select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .uploads { list-style: none; padding: 0; margin: 0; display: grid; gap: .55rem; }
-  .upload, .column-header {
+  .upload-row, .column-header {
     display: grid;
     grid-template-columns: var(--upload-columns);
     gap: .75rem;
@@ -92,14 +92,37 @@
   }
   .column-header button:hover, .column-header button[aria-pressed="true"] { color: var(--accent); }
   .sort-indicator { font-size: .8rem; }
-  .upload {
-    width: 100%;
+  .upload-row {
     border: 1px solid var(--line);
     border-radius: .65rem;
-    color: var(--text);
     background: var(--panel);
   }
-  .upload:hover { border-color: #89966b; background: #252d24; }
+  .upload-row:hover { border-color: #89966b; background: #252d24; }
+  .upload {
+    display: grid;
+    grid-column: span 5;
+    grid-template-columns: subgrid;
+    align-items: center;
+    padding: 0;
+    border: 0;
+    color: inherit;
+    background: transparent;
+    text-align: left;
+  }
+  .vbox7-link {
+    display: inline-flex;
+    align-items: center;
+    justify-self: end;
+    width: fit-content;
+    padding-inline: .65rem;
+    border-color: var(--line);
+    color: var(--accent);
+    background: transparent;
+    font-size: .875rem;
+    text-decoration: none;
+    white-space: nowrap;
+  }
+  .vbox7-link:hover { background: #303a2f; }
   .thumbnail {
     position: relative;
     display: grid;
@@ -155,6 +178,7 @@
   .close { background: transparent; border-color: var(--line); color: var(--text); }
   .close:hover { background: #303a2f; }
   .dialog-body { padding: 1rem clamp(.9rem, 4vw, 1.65rem) 1.5rem; }
+  .dialog-body .vbox7-link { margin-top: .75rem; }
   .player { position: relative; isolation: isolate; background: #090b09; border-radius: .5rem; overflow: hidden; }
   .player video { display: block; width: 100%; aspect-ratio: 16 / 9; max-height: 55vh; }
   .static { position: absolute; inset: 0 0 3rem; width: 100%; height: calc(100% - 3rem); pointer-events: none; opacity: .4; }
@@ -168,10 +192,11 @@
   .comment.reply { margin-left: .8rem; padding-left: .85rem; border-left: 2px solid var(--line); }
   .comment p { margin: .35rem 0 0; white-space: pre-wrap; }
   .comment-date { margin-left: .6rem; color: var(--muted); font-size: .85rem; }
-  @media (max-width: 43rem) {
+  @media (max-width: 51rem) {
     .toolbar { display: flex; }
     .column-header { display: none; }
-    .upload { grid-template-columns: clamp(3rem, 22vw, 6rem) repeat(2, minmax(0, 1fr)); gap: .35rem .7rem; }
+    .upload-row { grid-template-columns: minmax(0, 1fr); gap: .5rem; }
+    .upload { grid-column: 1; grid-template-columns: clamp(3rem, 22vw, 6rem) repeat(2, minmax(0, 1fr)); gap: .35rem .7rem; }
     .thumbnail { grid-row: span 3; align-self: start; }
     .title-group { grid-column: span 2; }
     .upload-date { grid-column: 2; }
@@ -259,6 +284,16 @@
 
   function uploadTitle(id, upload) {
     return typeof upload.title === "string" && upload.title.trim() ? upload.title : id;
+  }
+
+  function vbox7Link(id) {
+    if (!/^[0-9a-f]+$/i.test(id)) return null;
+    const link = element("a", "button vbox7-link", "Open on Vbox7");
+    link.href = `https://www.vbox7.com/play:${id}`;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    link.setAttribute("aria-description", "Opens in a new tab");
+    return link;
   }
 
   function uploadDateValue(value) {
@@ -426,6 +461,9 @@
       dialogBody.append(element("p", "notice", "No local video file was found for this upload."));
     }
 
+    const link = vbox7Link(id);
+    if (link) dialogBody.append(link);
+
     const details = element("dl", "details");
     for (const [label, value] of [
       ["Upload date", uploadDate(upload.upload_date)],
@@ -493,7 +531,7 @@
     for (const [index, [id, upload]] of entries.entries()) {
       const source = findMedia(upload.video_file);
       const hasVideo = Boolean(source);
-      const item = element("li");
+      const item = element("li", "upload-row");
       const card = element("button", "upload");
       card.type = "button";
       const thumbnail = element("span", hasVideo ? "thumbnail play" : "thumbnail", hasVideo ? "" : "–");
@@ -516,6 +554,8 @@
       if (visibility) titleGroup.append(element("span", "video-status visibility", visibility));
       card.addEventListener("click", () => showUpload(id, upload, findMedia));
       item.append(card);
+      const link = vbox7Link(id);
+      if (link) item.append(link);
       const date = uploadDateValue(upload.upload_date);
       archiveRows.push({
         item,
