@@ -382,7 +382,12 @@ def run(args):
     records = catalog["uploads"]
 
     with sync_playwright() as playwright, requests.Session() as http:
-        browser = playwright.chromium.launch(channel=args.browser, headless=False)
+        try:
+            browser = playwright.chromium.launch(channel="chrome", headless=False)
+        except BrowserError:
+            raise ArchiveError(
+                "Could not open Google Chrome. Make sure it is installed and opens from your desktop."
+            ) from None
         context = browser.new_context(accept_downloads=True)
         login = context.new_page()
         print(f"Sign in as {args.username} in the browser window. The archive starts after sign-in.", flush=True)
@@ -437,8 +442,8 @@ def main():
     parser.add_argument("username", help="your Vbox7 username")
     parser.add_argument("--output", type=Path, default=Path(__file__).resolve().parent,
                         help="destination containing videos/ and misc/")
-    parser.add_argument("--browser", choices=("msedge", "chrome"), default="msedge",
-                        help="installed browser for sign-in (default: msedge)")
+    parser.add_argument("--browser", choices=("chrome",),
+                        help="optional for compatibility. The script always uses Google Chrome.")
     parser.add_argument("--limit", type=int, help="process at most this many uploads, private first")
     args = parser.parse_args()
     if not args.username.strip() or (args.limit is not None and args.limit < 1):
@@ -450,8 +455,8 @@ def main():
     except ArchiveError as error:
         print(f"Archive stopped: {error}", file=sys.stderr)
     except BrowserError:
-        print("Archive stopped: the browser or Vbox7 could not be opened. "
-              "Check your connection and try --browser chrome if Edge is unavailable.", file=sys.stderr)
+        print("Archive stopped: Playwright could not start or the browser session failed. "
+              "Check your connection to Vbox7 and that the browser window is still open.", file=sys.stderr)
     except (OSError, ValueError, KeyError) as error:
         print(f"Archive stopped: could not read or write the local archive ({type(error).__name__}).",
               file=sys.stderr)

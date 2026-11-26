@@ -4,44 +4,57 @@ Back up your own Vbox7 uploads to your computer. The archiver scans your private
 
 ## Requirements
 
-- Python 3.9 was used to test the script. The commands below are for Windows PowerShell.
-- Microsoft Edge or Google Chrome installed locally.
+- Python 3.9 or newer.
+- Google Chrome installed locally using the standard installer or Linux package. [Google Chrome installation instructions](https://support.google.com/chrome/answer/95346)
+- A desktop session that can open Chrome for manual sign-in. Check that your Windows, macOS, or Linux version is supported. [Playwright system requirements](https://playwright.dev/python/docs/intro#system-requirements)
 - Access to the Vbox7 account you want to archive.
 
 ## Setup
 
-Clone or download this repository, then open PowerShell in the folder containing `vbox7_archive.py`. Create and activate a virtual environment, then install the dependencies.
+Clone or download this repository and open a terminal in the folder containing `vbox7_archive.py`.
+
+**Windows (PowerShell)**
 
 ```powershell
 python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --only-binary=:all: 'playwright<2' 'requests<3' 'beautifulsoup4<5'
+.\.venv\Scripts\python.exe -m pip install --only-binary=:all: 'playwright<2' 'requests<3' 'beautifulsoup4<5'
 ```
 
-Activate the environment again when you open a new PowerShell session.
+**Linux and macOS**
+
+```sh
+python3 -m venv .venv
+.venv/bin/python -m pip install --only-binary=:all: 'playwright<2' 'requests<3' 'beautifulsoup4<5'
+```
+
+On Debian or Ubuntu, install the `python3-venv` package if creating the virtual environment fails because `ensurepip` is unavailable.
 
 ## Run an archive
 
 Replace `YOUR_USERNAME` with your Vbox7 username. Start with one upload to check that sign-in and downloads work.
 
+**Windows (PowerShell)**
+
 ```powershell
-python vbox7_archive.py YOUR_USERNAME --limit 1
+.\.venv\Scripts\python.exe vbox7_archive.py YOUR_USERNAME --limit 1
 ```
 
-Sign in to that account on the Vbox7 page in the browser window that opens. Handle any notice shown by the site and keep the window open until the script finishes.
+**Linux and macOS**
+
+```sh
+.venv/bin/python vbox7_archive.py YOUR_USERNAME --limit 1
+```
+
+Sign in to that account on the Vbox7 page in the Chrome window that opens. Handle any notice shown by the site and keep the window open until the script finishes.
 
 Omit `--limit` to process all discovered uploads.
-
-```powershell
-python vbox7_archive.py YOUR_USERNAME
-```
 
 ### Command-line options
 
 | Option | Behavior |
 | --- | --- |
 | `--limit N` | Scan all three upload lists and process up to `N` uploads, starting with private uploads. |
-| `--browser {msedge,chrome}` | Choose the installed browser for sign-in. The default is `msedge`. |
+| `--browser chrome` | Optional for compatibility with existing commands. The script always uses Google Chrome. |
 | `--output PATH` | Save to a custom folder. The default is the folder containing the script. Use a separate output folder for each account. |
 | `--help` | Show usage and options. |
 
