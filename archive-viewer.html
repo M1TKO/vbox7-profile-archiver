@@ -49,7 +49,9 @@
   }
   .notice { color: var(--warning); margin: 0 0 1rem; }
   .empty { color: var(--muted); border: 1px dashed var(--line); border-radius: .75rem; padding: 1.25rem; }
-  .toolbar { display: none; align-items: center; justify-content: end; flex-wrap: wrap; gap: .5rem; margin: 0 0 .75rem; color: var(--muted); }
+  .toolbar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: .5rem 1rem; margin: 0 0 .75rem; color: var(--muted); }
+  .toolbar label, .sort-controls { display: inline-flex; align-items: center; gap: .5rem; }
+  .toolbar input { accent-color: var(--accent); }
   .toolbar select {
     max-width: 100%;
     min-height: 2.5rem;
@@ -60,7 +62,7 @@
     color: var(--text);
     font: inherit;
   }
-  .toolbar select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .toolbar :is(input, select):focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .uploads { list-style: none; padding: 0; margin: 0; display: grid; gap: .55rem; }
   .upload-row, .column-header {
     display: grid;
@@ -193,7 +195,6 @@
   .comment p { margin: .35rem 0 0; white-space: pre-wrap; }
   .comment-date { margin-left: .6rem; color: var(--muted); font-size: .85rem; }
   @media (max-width: 51rem) {
-    .toolbar { display: flex; }
     .column-header { display: none; }
     .upload-row { grid-template-columns: minmax(0, 1fr); gap: .5rem; }
     .upload { grid-column: 1; grid-template-columns: clamp(3rem, 22vw, 6rem) repeat(2, minmax(0, 1fr)); gap: .35rem .7rem; }
@@ -217,19 +218,25 @@
   <p class="notice" id="scan-warning" hidden>The listing scan was incomplete. Some uploads may be missing.</p>
   <p class="empty" id="empty" hidden>No uploads were found in this archive.</p>
   <div class="toolbar" id="toolbar" hidden>
-    <label for="sort-uploads">Sort by</label>
-    <select id="sort-uploads">
-      <option value="">Archive order</option>
-      <option value="title:asc">Title, A to Z</option>
-      <option value="title:desc">Title, Z to A</option>
-      <option value="date:desc">Date, newest first</option>
-      <option value="date:asc">Date, oldest first</option>
-      <option value="views:desc">Most views</option>
-      <option value="views:asc">Fewest views</option>
-      <option value="comments:desc">Most comments</option>
-      <option value="comments:asc">Fewest comments</option>
-    </select>
+    <label><input type="checkbox" id="hide-unavailable">Hide unavailable videos</label>
+    <div class="sort-controls">
+      <label for="sort-uploads">Sort by</label>
+      <select id="sort-uploads">
+        <option value="">Archive order</option>
+        <option value="title:asc">Title, A to Z</option>
+        <option value="title:desc">Title, Z to A</option>
+        <option value="date:desc">Date, newest first</option>
+        <option value="date:asc">Date, oldest first</option>
+        <option value="views:desc">Most views</option>
+        <option value="views:asc">Fewest views</option>
+        <option value="comments:desc">Most comments</option>
+        <option value="comments:asc">Fewest comments</option>
+        <option value="availability:desc">Availability, available first</option>
+        <option value="availability:asc">Availability, unavailable first</option>
+      </select>
+    </div>
   </div>
+  <p class="empty" id="no-available" role="status" hidden>No available videos in this archive.</p>
   <div class="column-header" id="column-header" role="group" aria-label="Sort uploads by column" hidden>
     <span>Preview</span>
     <button type="button" data-sort="title" data-first-direction="asc">Title<span class="sort-indicator" aria-hidden="true"></span></button>
@@ -256,6 +263,8 @@
   const scanWarning = document.querySelector("#scan-warning");
   const emptyArchive = document.querySelector("#empty");
   const toolbar = document.querySelector("#toolbar");
+  const hideUnavailable = document.querySelector("#hide-unavailable");
+  const noAvailable = document.querySelector("#no-available");
   const sortOrder = document.querySelector("#sort-uploads");
   const columnHeader = document.querySelector("#column-header");
   const sortButtons = columnHeader.querySelectorAll("button");
@@ -489,9 +498,11 @@
     return first === "asc" ? "desc" : "asc";
   }
 
-  function orderUploads() {
+  function updateUploadList() {
     const [field, direction] = sortOrder.value.split(":");
-    const rows = archiveRows.slice();
+    const rows = hideUnavailable.checked
+      ? archiveRows.filter(row => row.availability)
+      : archiveRows.slice();
     if (field) {
       rows.sort((first, second) => {
         const a = first[field];
@@ -505,6 +516,8 @@
     const list = document.createDocumentFragment();
     for (const row of rows) list.append(row.item);
     uploads.replaceChildren(list);
+    columnHeader.hidden = rows.length === 0;
+    noAvailable.hidden = archiveRows.length === 0 || rows.length !== 0;
 
     for (const button of sortButtons) {
       const active = button.dataset.sort === field;
@@ -531,17 +544,19 @@
     for (const [index, [id, upload]] of entries.entries()) {
       const source = findMedia(upload.video_file);
       const hasVideo = Boolean(source);
+      const isPlaceholder = upload.video_is_placeholder === true;
+      const hasOriginal = hasVideo && !isPlaceholder;
       const item = element("li", "upload-row");
       const card = element("button", "upload");
       card.type = "button";
       const thumbnail = element("span", hasVideo ? "thumbnail play" : "thumbnail", hasVideo ? "" : "–");
       thumbnail.setAttribute("aria-hidden", "true");
-      if (hasVideo && upload.video_is_placeholder !== true) previews.set(thumbnail, source);
+      if (hasOriginal) previews.set(thumbnail, source);
       const titleGroup = element("span", "title-group");
       const title = element("span", "upload-title", uploadTitle(id, upload));
       title.id = `upload-title-${index}`;
       titleGroup.append(title);
-      if (upload.video_is_placeholder === true) {
+      if (isPlaceholder) {
         titleGroup.append(element("span", "video-status", "Placeholder"));
       }
       if (!hasVideo) titleGroup.append(element("span", "video-status", "File unavailable"));
@@ -559,29 +574,30 @@
       const date = uploadDateValue(upload.upload_date);
       archiveRows.push({
         item,
+        availability: Number(hasOriginal),
         title: title.textContent,
         date: Number.isFinite(date) ? date : null,
         views: Number.isFinite(upload.view_count) && upload.view_count >= 0 ? upload.view_count : null,
         comments: Number.isFinite(upload.comment_count) && upload.comment_count >= 0 ? upload.comment_count : null,
       });
     }
-    orderUploads();
+    updateUploadList();
     stopPreviews = observePreviews(previews);
     toolbar.hidden = entries.length === 0;
-    columnHeader.hidden = entries.length === 0;
     status.textContent = `${catalog.username} · ${countLabel(entries.length, "upload", "uploads")}`;
     scanWarning.hidden = catalog.scan_complete !== false;
     emptyArchive.hidden = entries.length !== 0;
   }
 
   openFolder.addEventListener("click", () => folder.click());
-  sortOrder.addEventListener("change", orderUploads);
+  hideUnavailable.addEventListener("change", updateUploadList);
+  sortOrder.addEventListener("change", updateUploadList);
   for (const button of sortButtons) {
     button.addEventListener("click", () => {
       const [field, direction] = sortOrder.value.split(":");
       const next = nextSortDirection(button, field, direction);
       sortOrder.value = next ? `${button.dataset.sort}:${next}` : "";
-      orderUploads();
+      updateUploadList();
     });
   }
   dialog.addEventListener("close", () => {

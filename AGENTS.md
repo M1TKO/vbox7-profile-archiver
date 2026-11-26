@@ -3,7 +3,7 @@
 ## Project workflow
 
 - `vbox7_archive.py` is the Python CLI entry point. It uses Playwright to open local Google Chrome for manual sign-in, then verifies the signed-in owner before scanning. `vbox7_storage.py` manages filesystem writes and validation.
-- `archive-viewer.html` is the standalone read-only viewer. It automatically loads the generated `misc/viewer-data.js` beside the page and can also read `misc/metadata.json` from a user-selected folder. Keep viewer data local and ignored by Git, and preserve support for existing catalogs, placeholders, and missing media.
+- `archive-viewer.html` is the standalone read-only viewer. It automatically loads the generated `misc/viewer-data.js` beside the page and can also read `misc/metadata.json` from a user-selected folder. Keep viewer data local and ignored by Git, and preserve support for existing catalogs, placeholders, and missing media. Availability filtering and sorting treat placeholders and uploads without a resolved local video as unavailable. Automatic loading resolves paths from the catalog, and the folder picker checks the selected files.
 - Follow the setup in `README.md` and install dependencies from `requirements.txt`. Maintain compatibility with Python 3.9 or newer and the documented Windows, macOS, and Linux commands.
 - Preserve private, friends-only, then public discovery order and keep the first visibility for duplicate IDs. `--limit` applies to processing after discovery. Preserve already recognized uploads when a listing scan is incomplete.
 - Keep `--dry-run` read-only. It uses the normal sign-in, discovery, selection, and saved-video checks to count planned downloads. Report incomplete listing scans with a nonzero exit status.
@@ -19,7 +19,7 @@
 
 - Use the project virtual environment to run `python -m py_compile vbox7_archive.py vbox7_storage.py` for a syntax check, `python vbox7_archive.py --help` for a CLI smoke check, and `python -m unittest discover -s tests -v` for offline regression checks.
 - For a live smoke check, follow the one-upload example in `README.md` with an authorized account and a separate `--output` directory.
-- For viewer changes, open the page directly in Chrome beside a synthetic archive with generated viewer data, then exercise the folder picker. Check lazy video previews, sorting, playback, saved comments, placeholder and missing-media states, and keyboard dismissal. Verify that **Open on Vbox7** opens the upload's page in a new tab from the list and video details, including for uploads without local media.
+- For viewer changes, open the page directly in Chrome beside a synthetic archive with generated viewer data, then exercise the folder picker. Check lazy video previews, sorting, availability filtering, playback, saved comments, placeholder and missing-media states, and keyboard dismissal. Verify that **Open on Vbox7** opens the upload's page in a new tab from the list and video details, including for uploads without local media.
 
 ## Keep these instructions current
 
