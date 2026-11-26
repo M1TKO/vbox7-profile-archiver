@@ -18,6 +18,9 @@ import requests
 
 
 BASE = "https://www.vbox7.com"
+PLACEHOLDER_VIDEO_URL = f"{BASE}/assets/blank.mp4"
+PLACEHOLDER_STATIC_URL = ("https://i49.vbox7.com/assets/css/vbox/vboxplayer/"
+                          "themes/slickblack/static.gif")
 FILTERS = ("private", "friends", "public")
 VIDEO_ID = re.compile(r"/play:([0-9a-fA-F]+)")
 DOWNLOAD_LABEL = re.compile(r"^\s*(?:изтегли|свали|download)\b", re.IGNORECASE)
@@ -229,6 +232,23 @@ def collect_comments(api, record):
             return comments, total, str(error)
 
 
+def show_download_progress(size, total=None, *, complete=False):
+    status = "Download complete" if complete else "Downloading"
+    scale = max(size, total or 0)
+    if scale >= 1024 ** 2:
+        divisor, unit = 1024 ** 2, "MiB"
+    elif scale >= 1024:
+        divisor, unit = 1024, "KiB"
+    else:
+        divisor, unit = 1, "B"
+    if total:
+        percentage = min(size * 100 // total, 100)
+        progress = f"{size / divisor:.1f} / {total / divisor:.1f} {unit} ({percentage}%)"
+    else:
+        progress = f"{size / divisor:.1f} {unit}"
+    print(f"  {status}: {progress}", flush=True)
+
+
 def stream_mp4(http, url, referer, destination):
     partial = destination.with_suffix(".mp4.part")
     try:
@@ -240,16 +260,23 @@ def stream_mp4(http, url, referer, destination):
             first = next(chunks, b"")
             if first[4:8] != b"ftyp":
                 return False
+            expected = number(response.headers.get("Content-Length"))
             size = len(first)
             with partial.open("wb") as output:
                 output.write(first)
+                show_download_progress(size, expected)
+                last_update = monotonic()
                 for chunk in chunks:
                     output.write(chunk)
                     size += len(chunk)
-            expected = number(response.headers.get("Content-Length"))
+                    now = monotonic()
+                    if now - last_update >= 2 and (expected is None or size < expected):
+                        show_download_progress(size, expected)
+                        last_update = now
             if expected is not None and size != expected:
                 return False
         partial.replace(destination)
+        show_download_progress(size, expected, complete=True)
         return True
     except requests.RequestException:
         return False
@@ -271,20 +298,54 @@ def browser_download(page, record, destination):
             action.click(timeout=3_000)
         download = event.value
         suffix = Path(download.suggested_filename).suffix.lower()
-        if suffix not in VIDEO_EXTENSIONS or download.failure():
+        if suffix not in VIDEO_EXTENSIONS:
+            return None
+        print("  Downloading with Chrome...", flush=True)
+        if download.failure():
             return None
         output = destination.with_suffix(suffix)
         partial = output.with_suffix(suffix + ".part")
         try:
             download.save_as(partial)
-            if partial.stat().st_size:
+            size = partial.stat().st_size
+            if size:
                 partial.replace(output)
+                show_download_progress(size, complete=True)
                 return output
         finally:
             partial.unlink(missing_ok=True)
     except BrowserError:
         pass
     return None
+
+
+def nonempty_file(path):
+    return path.is_file() and path.stat().st_size > 0
+
+
+def existing_video(record, video_dir):
+    filename = record.get("video_file") or f"{record['id']}.mp4"
+    path = video_dir / Path(filename).name
+    if nonempty_file(path):
+        return path
+    return None
+
+
+def save_placeholder_static(api, video_dir):
+    # The player overlays this GIF on its blank MP4 to display the static effect.
+    path = video_dir / "vbox7-static.gif"
+    if nonempty_file(path):
+        return path
+    data = fetch(api, PLACEHOLDER_STATIC_URL)
+    if not data.startswith((b"GIF87a", b"GIF89a")):
+        raise ArchiveError("Vbox7 did not return the static placeholder GIF.")
+    partial = path.with_suffix(".gif.part")
+    try:
+        partial.write_bytes(data)
+        partial.replace(path)
+    finally:
+        partial.unlink(missing_ok=True)
+    return path
 
 
 def archive_video(api, page, http, record, video_dir):
@@ -296,30 +357,50 @@ def archive_video(api, page, http, record, video_dir):
         errors["video_page"] = str(error)
 
     destination = video_dir / f"{record['id']}.mp4"
-    existing = video_dir / Path(record.get("video_file") or destination.name).name
-    if existing.is_file() and existing.stat().st_size:
+    existing = existing_video(record, video_dir)
+    if existing is not None:
         record["video_file"] = f"videos/{existing.name}"
     else:
         record["video_file"] = None
+        record.pop("video_is_placeholder", None)
+        source_unavailable = False
         try:
             payload = fetch(api, f"{BASE}/aj/player/item/options", as_json=True, referer=record["url"],
                             params={"vid": record["id"]})
             options = payload.get("options") or {}
             if options.get("title") and not record.get("title"):
                 record["title"] = options["title"]
-            for source in media_candidates(options):
-                if stream_mp4(http, source, record["url"], destination):
-                    record["video_file"] = f"videos/{destination.name}"
-                    break
+            source_unavailable = options.get("src") == "blank"
+            if source_unavailable:
+                placeholder = destination.with_suffix(".placeholder.mp4")
+                print("  Original unavailable. Saving the Vbox7 placeholder.", flush=True)
+                if nonempty_file(placeholder) or stream_mp4(http, PLACEHOLDER_VIDEO_URL, record["url"], placeholder):
+                    record["video_file"] = f"videos/{placeholder.name}"
+                    record["video_is_placeholder"] = True
+                else:
+                    errors["download"] = "Vbox7's placeholder video could not be saved."
+            else:
+                for source in media_candidates(options):
+                    if stream_mp4(http, source, record["url"], destination):
+                        record["video_file"] = f"videos/{destination.name}"
+                        break
         except ArchiveError as error:
             errors["download"] = str(error)
-        if record["video_file"] is None:
+        if record["video_file"] is None and not source_unavailable:
             file = browser_download(page, record, destination)
             if file:
                 record["video_file"] = f"videos/{file.name}"
                 errors.pop("download", None)
             else:
                 errors.setdefault("download", "No downloadable video was returned. Check its download control in Vbox7.")
+
+    record.pop("placeholder_static_file", None)
+    if record.get("video_is_placeholder"):
+        try:
+            static = save_placeholder_static(api, video_dir)
+            record["placeholder_static_file"] = f"videos/{static.name}"
+        except ArchiveError as error:
+            errors["placeholder_static"] = str(error)
 
     comments, total, error = collect_comments(api, record)
     if not error or not record.get("comments") or len(comments) > len(record["comments"]):
@@ -372,8 +453,9 @@ def wait_for_sign_in(context, username):
 def run(args):
     video_dir = args.output / "videos"
     index = args.output / "misc" / "metadata.json"
-    video_dir.mkdir(parents=True, exist_ok=True)
-    index.parent.mkdir(parents=True, exist_ok=True)
+    if not args.dry_run:
+        video_dir.mkdir(parents=True, exist_ok=True)
+        index.parent.mkdir(parents=True, exist_ok=True)
     catalog = json.loads(index.read_text(encoding="utf-8")) if index.is_file() else {
         "username": args.username, "uploads": {},
     }
@@ -390,7 +472,8 @@ def run(args):
             ) from None
         context = browser.new_context(accept_downloads=True)
         login = context.new_page()
-        print(f"Sign in as {args.username} in the browser window. The archive starts after sign-in.", flush=True)
+        print(f"Sign in as {args.username} in the browser window. The upload scan starts after sign-in.",
+              flush=True)
         target = urlsplit(profile_url(args.username, "private"))
         login.goto(f"{BASE}/login?" + urlencode({"backto": f"{target.path}?{target.query}"}),
                    wait_until="domcontentloaded", timeout=45_000)
@@ -415,12 +498,22 @@ def run(args):
                 print(f"{visibility} listing: {error}", file=sys.stderr)
             print(f"{visibility}: {count} upload(s)", flush=True)
 
+        selected = list(work.values())[:args.limit]
+        if args.dry_run:
+            downloads = sum(existing_video(record, video_dir) is None for record in selected)
+            print(f"Dry run. Uploads found: {len(work)}. Uploads selected: {len(selected)}. "
+                  f"New downloads planned: {downloads}.")
+            if listing_errors:
+                print("The upload scan was incomplete. Counts reflect the uploads found so far.")
+            context.close()
+            browser.close()
+            return int(bool(listing_errors))
+
         catalog.update({"listing_errors": listing_errors, "scan_complete": not listing_errors,
                         "last_run_limit": args.limit})
         save_json(index, catalog)
         if not work:
             raise ArchiveError("No uploads were found. Verify the uploads list in the signed-in browser.")
-        selected = list(work.values())[:args.limit]
         page = context.new_page()
         flagged = 0
         for offset, record in enumerate(selected, start=1):
@@ -430,7 +523,9 @@ def run(args):
             if record["errors"]:
                 flagged += 1
                 print(f"  Review: {', '.join(record['errors'])}", flush=True)
-        print(f"Videos saved: {sum(bool(r['video_file']) for r in selected)}/{len(selected)}. "
+        placeholders = sum(bool(r.get("video_is_placeholder")) for r in selected)
+        videos = sum(bool(r["video_file"]) for r in selected) - placeholders
+        print(f"Videos saved: {videos}/{len(selected)}. Placeholders saved: {placeholders}. "
               f"Entries to review: {flagged}. Index: {index}", flush=True)
         context.close()
         browser.close()
@@ -445,6 +540,8 @@ def main():
     parser.add_argument("--browser", choices=("chrome",),
                         help="optional for compatibility. The script always uses Google Chrome.")
     parser.add_argument("--limit", type=int, help="process at most this many uploads, private first")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="show upload and planned download counts without writing archive files")
     args = parser.parse_args()
     if not args.username.strip() or (args.limit is not None and args.limit < 1):
         parser.error("provide a username and a positive --limit when using it")
