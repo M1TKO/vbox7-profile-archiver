@@ -149,21 +149,27 @@ def parse_video(html):
     }
 
 
+def comment_text(item, wrapper, selector, separator=" "):
+    for node in wrapper.select(selector):
+        if node.find_parent(class_="item-comment") is item:
+            return node.get_text(separator, strip=True)
+    return None
+
+
 def parse_comments(html):
     comments = []
     for item in BeautifulSoup(html, "html.parser").select(".item-comment"):
         parent = item.find_parent(class_="item-comment")
         wrapper = item.select_one(":scope > .parent-comment") or item
-        body = next((node for node in wrapper.select(".comment-text")
-                     if node.find_parent(class_="item-comment") is item), None)
+        body = comment_text(item, wrapper, ".comment-text", "\n")
         if body is None:
             raise ArchiveError("A comment had no recognizable body.")
         comments.append({
             "id": re.sub(r"^comment[-_]", "", item.get("id", "")) or None,
             "parent_id": re.sub(r"^comment[-_]", "", parent.get("id", "")) or None if parent else None,
-            "author": text_at(wrapper, ".comment-author"),
-            "date_display": text_at(wrapper, ".comment-date"),
-            "text": body.get_text("\n", strip=True),
+            "author": comment_text(item, wrapper, ".comment-author"),
+            "date_display": comment_text(item, wrapper, ".comment-date"),
+            "text": body,
         })
     return comments
 

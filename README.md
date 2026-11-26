@@ -113,7 +113,7 @@ After a run, check the `Videos saved` and `Entries to review` totals. In `misc/m
 
 The scan keeps the first visibility for uploads that appear in more than one list. If Vbox7 redirects a scan to a different list or returns an unrecognized layout, the run reports incomplete discovery and exits with status 1. A partial comment refresh records an error and preserves previously saved comments.
 
-To continue after an interruption or retry a failed download, run the script again with the same username and output folder, then sign in again. The script checks video headers before reusing completed files and verifies that MP4 files contain media data. It updates the catalog as entries change. Only one archive run can write to an output folder at a time. The file `misc/.archive.lock` stays on disk so runs can acquire the same OS lock.
+To continue after an interruption or retry a failed download, run the script again with the same username and output folder, then sign in again. The script checks video headers before reusing completed files. For MP4 files, it checks that the top-level boxes are complete and that at least one contains media data. It updates the catalog as entries change. Only one archive run can write to an output folder at a time. The file `misc/.archive.lock` stays on disk so runs can acquire the same OS lock.
 
 ## Offline checks
 

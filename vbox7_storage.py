@@ -60,10 +60,13 @@ def valid_video(path, suffix=None):
 def has_mp4_media_data(video):
     size = os.fstat(video.fileno()).st_size
     offset = 0
+    has_media = False
     # Check top-level box sizes without loading the video payload.
     while offset + 8 <= size:
         video.seek(offset)
         header = video.read(8)
+        if len(header) != 8:
+            return False
         box_size = int.from_bytes(header[:4], "big")
         header_size = 8
         if box_size == 1:
@@ -77,9 +80,9 @@ def has_mp4_media_data(video):
         if box_size < header_size or offset + box_size > size:
             return False
         if header[4:] == b"mdat" and box_size > header_size:
-            return True
+            has_media = True
         offset += box_size
-    return False
+    return has_media and offset == size
 
 
 def existing_video(record, video_dir):

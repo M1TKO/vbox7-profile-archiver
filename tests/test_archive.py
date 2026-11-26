@@ -86,6 +86,18 @@ class SiteTests(unittest.TestCase):
         with patch.object(archive, "fetch", return_value=comments(1, thread)):
             self.assertTrue(archive.collect_comments(None, RECORD)[2])
 
+    def test_comment_does_not_inherit_author_or_date_from_reply(self):
+        thread = ('<div class="item-comment" id="comment-1">'
+                  '<p class="comment-text">Root</p>'
+                  '<div class="item-comment" id="comment-2">'
+                  '<span class="comment-author">Reply author</span>'
+                  '<span class="comment-date">Reply date</span>'
+                  '<p class="comment-text">Reply</p></div></div>')
+        root, reply = archive.parse_comments(thread)
+        self.assertEqual((root["author"], root["date_display"]), (None, None))
+        self.assertEqual((reply["parent_id"], reply["author"], reply["date_display"]),
+                         ("1", "Reply author", "Reply date"))
+
     def test_malformed_nested_values_are_scoped(self):
         with patch.object(archive, "fetch", return_value={"pagination": [1], "html": ""}):
             self.assertTrue(archive.collect_comments(None, RECORD)[2])
@@ -188,6 +200,15 @@ class ArchiveTests(unittest.TestCase):
         (self.videos / "a.mp4").write_bytes(MP4_HEADER)
         self.assertIsNone(archive.existing_video(RECORD, self.videos))
 
+    def test_mp4_with_truncated_box_after_media_is_not_reused(self):
+        path = self.videos / "a.mp4"
+        for trailing in (b"\x00\x00", b"\x00\x00\x00\x10moov"):
+            with self.subTest(trailing=trailing):
+                path.write_bytes(VIDEO + trailing)
+                self.assertIsNone(archive.existing_video(RECORD, self.videos))
+        path.write_bytes(VIDEO + b"\x00\x00\x00\x08free")
+        self.assertEqual(archive.existing_video(RECORD, self.videos), path)
+
     def test_browser_download_rejects_a_redirect_to_another_video(self):
         page = MagicMock()
         page.url = archive.BASE + "/play:b"
@@ -260,38 +281,6 @@ class ArchiveTests(unittest.TestCase):
         self.assertIsNone(record["video_file"])
         self.assertIn("unrecognized player options", record["errors"]["download"])
         self.assertEqual(list(self.videos.iterdir()), [])
-
-    def test_blank_player_saves_marked_placeholder_and_overlay(self):
-        record = dict(RECORD)
-
-        def save(_http, _source, _referer, path):
-            path.write_bytes(VIDEO)
-
-        with patch.object(archive, "fetch", side_effect=[
-            VIDEO_PAGE, {"options": {"src": "blank"}}, b"GIF89a", comments(0, ""),
-        ]), patch.object(archive, "stream_mp4", side_effect=save), contextlib.redirect_stdout(io.StringIO()):
-            archive.archive_video(None, None, None, record, self.videos)
-        self.assertTrue(record["video_is_placeholder"])
-        self.assertEqual(record["video_file"], "videos/a.placeholder.mp4")
-        self.assertEqual(record["placeholder_static_file"], "videos/vbox7-static.gif")
-        self.assertEqual(record["title"], "Synthetic")
-        self.assertEqual(record["errors"], {})
-
-    def test_blank_player_saves_marked_placeholder_and_overlay(self):
-        record = dict(RECORD)
-
-        def save(_http, _source, _referer, path):
-            path.write_bytes(VIDEO)
-
-        with patch.object(archive, "fetch", side_effect=[
-            VIDEO_PAGE, {"options": {"src": "blank"}}, b"GIF89a", comments(0, ""),
-        ]), patch.object(archive, "stream_mp4", side_effect=save), contextlib.redirect_stdout(io.StringIO()):
-            archive.archive_video(None, None, None, record, self.videos)
-        self.assertTrue(record["video_is_placeholder"])
-        self.assertEqual(record["video_file"], "videos/a.placeholder.mp4")
-        self.assertEqual(record["placeholder_static_file"], "videos/vbox7-static.gif")
-        self.assertEqual(record["title"], "Synthetic")
-        self.assertEqual(record["errors"], {})
 
     def test_blank_player_saves_marked_placeholder_and_overlay(self):
         record = dict(RECORD)
@@ -431,62 +420,6 @@ class ArchiveTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(archive.ArchiveError):
             archive.stream_mp4(http, archive.BASE + "/synthetic.mp4", RECORD["url"], self.videos / "a.mp4")
         self.assertEqual(list(self.videos.iterdir()), [])
-
-    def test_direct_download_reports_completion_after_validated_final_rename(self):
-        target = self.videos / "a.mp4"
-        response = SimpleNamespace(
-            headers={"Content-Length": str(len(VIDEO))},
-            iter_content=lambda **_kwargs: iter([VIDEO[:4], VIDEO[4:]]),
-        )
-        updates = []
-
-        def progress(size, total=None, *, complete=False):
-            updates.append((size, total, complete, target.exists()))
-
-        with patch.object(archive, "show_download_progress", side_effect=progress):
-            archive.save_mp4_response(response, target, archive.monotonic() + 30)
-        self.assertEqual(updates, [(len(VIDEO), len(VIDEO), False, False), (len(VIDEO), len(VIDEO), True, True)])
-
-    def test_direct_size_mismatch_preserves_the_previous_file(self):
-        target = self.videos / "a.mp4"
-        target.write_bytes(VIDEO)
-        response = SimpleNamespace(
-            headers={"Content-Length": str(len(VIDEO) + 1)},
-            iter_content=lambda **_kwargs: iter([VIDEO[:-1] + b"\x02"]),
-        )
-        with contextlib.redirect_stdout(io.StringIO()) as log, self.assertRaises(archive.ArchiveError):
-            archive.save_mp4_response(response, target, archive.monotonic() + 30)
-        self.assertEqual(target.read_bytes(), VIDEO)
-        self.assertNotIn("Download complete", log.getvalue())
-        self.assertEqual(list(self.videos.iterdir()), [target])
-
-    def test_direct_download_reports_completion_after_validated_final_rename(self):
-        target = self.videos / "a.mp4"
-        response = SimpleNamespace(
-            headers={"Content-Length": str(len(VIDEO))},
-            iter_content=lambda **_kwargs: iter([VIDEO[:4], VIDEO[4:]]),
-        )
-        updates = []
-
-        def progress(size, total=None, *, complete=False):
-            updates.append((size, total, complete, target.exists()))
-
-        with patch.object(archive, "show_download_progress", side_effect=progress):
-            archive.save_mp4_response(response, target, archive.monotonic() + 30)
-        self.assertEqual(updates, [(len(VIDEO), len(VIDEO), False, False), (len(VIDEO), len(VIDEO), True, True)])
-
-    def test_direct_size_mismatch_preserves_the_previous_file(self):
-        target = self.videos / "a.mp4"
-        target.write_bytes(VIDEO)
-        response = SimpleNamespace(
-            headers={"Content-Length": str(len(VIDEO) + 1)},
-            iter_content=lambda **_kwargs: iter([VIDEO[:-1] + b"\x02"]),
-        )
-        with contextlib.redirect_stdout(io.StringIO()) as log, self.assertRaises(archive.ArchiveError):
-            archive.save_mp4_response(response, target, archive.monotonic() + 30)
-        self.assertEqual(target.read_bytes(), VIDEO)
-        self.assertNotIn("Download complete", log.getvalue())
-        self.assertEqual(list(self.videos.iterdir()), [target])
 
     def test_direct_download_reports_completion_after_validated_final_rename(self):
         target = self.videos / "a.mp4"
