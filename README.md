@@ -4,7 +4,7 @@ Back up your own Vbox7 uploads to your computer. The archiver scans your private
 
 ## Requirements
 
-- Python 3.9 or newer.
+- Python 3.9 or newer. Python 3.9 is kept for compatibility. Use a maintained Python release for a new installation.
 - Google Chrome installed locally using the standard installer or Linux package. [Google Chrome installation instructions](https://support.google.com/chrome/answer/95346)
 - A desktop session that can open Chrome for manual sign-in. Check that your Windows, macOS, or Linux version is supported. [Playwright system requirements](https://playwright.dev/python/docs/intro#system-requirements)
 - Access to the Vbox7 account you want to archive.
@@ -17,14 +17,14 @@ Clone or download this repository and open a terminal in the folder containing `
 
 ```powershell
 python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install --only-binary=:all: 'playwright<2' 'requests<3' 'beautifulsoup4<5'
+.\.venv\Scripts\python.exe -m pip install --only-binary=:all: -r requirements.txt
 ```
 
 **Linux and macOS**
 
 ```sh
 python3 -m venv .venv
-.venv/bin/python -m pip install --only-binary=:all: 'playwright<2' 'requests<3' 'beautifulsoup4<5'
+.venv/bin/python -m pip install --only-binary=:all: -r requirements.txt
 ```
 
 On Debian or Ubuntu, install the `python3-venv` package if creating the virtual environment fails because `ensurepip` is unavailable.
@@ -36,18 +36,18 @@ Replace `YOUR_USERNAME` with your Vbox7 username. Start with one upload to check
 **Windows (PowerShell)**
 
 ```powershell
-.\.venv\Scripts\python.exe vbox7_archive.py YOUR_USERNAME --limit 1
+.\.venv\Scripts\python.exe vbox7_archive.py YOUR_USERNAME --limit 1 --output "$env:USERPROFILE\vbox7-smoke"
 ```
 
 **Linux and macOS**
 
 ```sh
-.venv/bin/python vbox7_archive.py YOUR_USERNAME --limit 1
+.venv/bin/python vbox7_archive.py YOUR_USERNAME --limit 1 --output "$HOME/vbox7-smoke"
 ```
 
 Sign in to that account on the Vbox7 page in the Chrome window that opens. Handle any notice shown by the site and keep the window open until the script finishes.
 
-Omit `--limit` to process all discovered uploads.
+Omit `--limit` to process all discovered uploads. Keep the same `--output` to reuse your smoke-check download, or choose a separate folder for the full archive. Store custom archives outside the repository.
 
 During each direct download, the script reports how much data it has received. When the server provides the file size, it also shows the total size and percentage. If the script uses Chrome's download action, it shows when Chrome starts and how much data was saved at completion.
 
@@ -59,7 +59,7 @@ Add `--dry-run` to preview an archive after signing in. For example, with the pr
 python vbox7_archive.py YOUR_USERNAME --dry-run --limit 10
 ```
 
-The preview reports the total number of distinct uploads found, how many a normal run would process with the given limit, and how many of those would need a new download. It checks for reusable videos in the selected `--output` folder and leaves all archive files untouched. Download availability is checked during an actual archive. If a listing fails, the preview labels the counts as incomplete and exits with status 1.
+The preview reports the number of distinct uploads found, how many a normal run would process with the given limit, and how many would need a download attempt. It checks for reusable videos in the selected `--output` folder and leaves all archive files untouched. With `--retry-placeholders`, saved placeholders count as planned attempts. Source availability is checked during an actual archive. If a listing fails, the preview labels the counts as incomplete and exits with status 1.
 
 ### Command-line options
 
@@ -67,6 +67,7 @@ The preview reports the total number of distinct uploads found, how many a norma
 | --- | --- |
 | `--limit N` | Scan all three upload lists and process up to `N` uploads, starting with private uploads. |
 | `--dry-run` | Preview upload and planned download counts without writing archive files. |
+| `--retry-placeholders` | Check whether an original video is available for each selected upload with a saved placeholder. |
 | `--browser chrome` | Optional for compatibility with existing commands. The script always uses Google Chrome. |
 | `--output PATH` | Save to a custom folder. The default is the folder containing the script. Use a separate output folder for each account. |
 | `--help` | Show usage and options. |
@@ -80,13 +81,21 @@ The preview reports the total number of distinct uploads found, how many a norma
 
 When the signed-in player reports a blank source, the archiver saves Vbox7's blank video as `videos/<id>.placeholder.mp4` and saves its animated static overlay once as `videos/vbox7-static.gif`. The catalog keeps the original upload's available metadata and comments, marks the video with `video_is_placeholder`, and links the overlay in `placeholder_static_file`. The run summary counts placeholders separately.
 
-The archive can contain private videos and comments. Keep generated files out of public commits and releases.
+Saved placeholders can be reused on later runs. Add `--retry-placeholders` to check whether the original has become available. The catalog keeps pointing to the saved placeholder until a validated original is saved.
+
+The archive can contain private videos and comments. Git ignores generated contents in the repository's default `videos/` and `misc/` directories. Keep custom archives outside the checkout and generated files out of public releases.
 
 ## Check or resume an archive
 
 After a run, check the `Videos saved` and `Entries to review` totals. In `misc/metadata.json`, `scan_complete` reports whether the upload lists were scanned successfully. Check `listing_errors` for scan failures and each upload's `errors` for problems retrieving the video, metadata, or comments.
 
-To continue after an interruption or retry a failed download, run the script again with the same username and output folder, then sign in again. The script reuses existing video files and updates the catalog as it goes.
+The scan keeps the first visibility for uploads that appear in more than one list. If Vbox7 redirects a scan to a different list or returns an unrecognized layout, the run reports incomplete discovery and exits with status 1. A partial comment refresh records an error and preserves previously saved comments.
+
+To continue after an interruption or retry a failed download, run the script again with the same username and output folder, then sign in again. The script checks video headers before reusing completed files and verifies that MP4 files contain media data. It updates the catalog as entries change. Only one archive run can write to an output folder at a time. The file `misc/.archive.lock` stays on disk so runs can acquire the same OS lock.
+
+## Offline checks
+
+From the project virtual environment, run `python -m unittest discover -s tests -v`. The suite uses synthetic data and runs without a browser or account. GitHub Actions runs it on Windows, macOS, and Linux.
 
 ## License
 

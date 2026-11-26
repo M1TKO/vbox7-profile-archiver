@@ -4,6 +4,7 @@ Run with --help for options. Requires Playwright, Beautiful Soup and Requests.
 """
 
 import argparse
+from contextlib import closing
 from datetime import datetime
 import json
 from pathlib import Path
@@ -16,6 +17,11 @@ from bs4 import BeautifulSoup
 from playwright.sync_api import Error as BrowserError, sync_playwright
 import requests
 
+from vbox7_storage import (
+    ArchiveError, VIDEO_EXTENSIONS, archive_lock, existing_video, is_placeholder,
+    load_catalog, save_json, staged_file, valid_static, valid_video, video_header_valid,
+)
+
 
 BASE = "https://www.vbox7.com"
 PLACEHOLDER_VIDEO_URL = f"{BASE}/assets/blank.mp4"
@@ -24,11 +30,18 @@ PLACEHOLDER_STATIC_URL = ("https://i49.vbox7.com/assets/css/vbox/vboxplayer/"
 FILTERS = ("private", "friends", "public")
 VIDEO_ID = re.compile(r"/play:([0-9a-fA-F]+)")
 DOWNLOAD_LABEL = re.compile(r"^\s*(?:изтегли|свали|download)\b", re.IGNORECASE)
-VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi", ".flv", ".wmv", ".mpeg", ".mpg", ".3gp"}
+EMPTY_LIST = re.compile(
+    r"(?:no (?:uploads|videos)(?: found)?|няма (?:качени )?(?:клипове|видеа)|"
+    r"няма намерени (?:клипове|видеа))[.!]?", re.IGNORECASE
+)
+RETRYABLE_HTTP = {500, 502, 503, 504}
+DOWNLOAD_DEADLINE = 30 * 60
 
 
-class ArchiveError(Exception):
-    """An error whose message can be displayed without exposing session data."""
+class IncompleteListing(ArchiveError):
+    def __init__(self, message, uploads):
+        super().__init__(message)
+        self.uploads = uploads
 
 
 def profile_url(username, visibility):
@@ -41,12 +54,12 @@ def text_at(node, selector):
 
 
 def number(value):
-    compact = re.sub(r"[\s,]", "", str(value))
-    return int(compact) if compact.isdecimal() else None
+    compact = re.sub(r"[\s,]", "", str(value)) if isinstance(value, (str, int)) else ""
+    return int(compact) if len(compact) <= 20 and compact.isdecimal() else None
 
 
 def upload_date(value):
-    if not value:
+    if not isinstance(value, str) or not value:
         return None
     try:
         return datetime.strptime(value, "%d.%m.%Y").date().isoformat()
@@ -57,26 +70,47 @@ def upload_date(value):
             return None
 
 
-def parse_listing(html):
+def parse_listing(html, *, page=1):
     soup = BeautifulSoup(html, "html.parser")
     feed = soup.select_one(".major-col section.feed")
     if not feed:
         raise ArchiveError("Vbox7 did not return an uploads list.")
     uploads = []
+    unrecognized_card = False
     for card in feed.select(".video-cell"):
-        link = card.select_one("a.thumb-cont[href], h3 a[href]")
-        match = VIDEO_ID.fullmatch(unquote(urlsplit(link["href"]).path)) if link else None
-        if match:
-            uploads.append({
-                "id": match[1].lower(),
-                "url": f"{BASE}/play:{match[1].lower()}",
-                "title": text_at(card, "h3") or link.get("title"),
-                "upload_date": upload_date(text_at(card, "svg.time + span")),
-                "view_count": number(text_at(card, "svg.views + span")),
-            })
-    if not uploads and not feed.select_one(".row-mb"):
-        raise ArchiveError("The uploads list is empty or its layout has changed.")
-    return uploads, bool(feed.select_one('.pagination a[rel="next"][href]'))
+        for link in card.select("a.thumb-cont[href], h3 a[href]"):
+            try:
+                match = VIDEO_ID.fullmatch(unquote(urlsplit(link["href"]).path))
+            except ValueError:
+                continue
+            if match:
+                break
+        else:
+            unrecognized_card = True
+            continue
+        video_id = match[1].lower()
+        uploads.append({
+            "id": video_id,
+            "url": f"{BASE}/play:{video_id}",
+            "title": text_at(card, "h3") or link.get("title"),
+            "upload_date": upload_date(text_at(card, "svg.time + span")),
+            "view_count": number(text_at(card, "svg.views + span")),
+        })
+    if unrecognized_card:
+        raise IncompleteListing("An upload card had no recognizable video link.", uploads)
+    empty_message = feed.select_one(".row-mb") or feed
+    if not uploads and not EMPTY_LIST.fullmatch(empty_message.get_text(" ", strip=True)):
+        raise ArchiveError("The uploads list had no recognized videos or empty-state message.")
+    has_next = bool(feed.select_one('.pagination a[rel="next"][href]'))
+    if not has_next:
+        for link in feed.select(".pagination a[href]"):
+            try:
+                pages = parse_qs(urlsplit(link["href"]).query).get("page", [])
+            except ValueError:
+                raise IncompleteListing("Vbox7 returned an invalid pagination link.", uploads) from None
+            if any((number(value) or 0) > page for value in pages):
+                raise IncompleteListing("Vbox7 advertised more uploads without a recognized next-page control.", uploads)
+    return uploads, has_next
 
 
 def parse_video(html):
@@ -93,6 +127,8 @@ def parse_video(html):
     counts = info.get("interactionStatistic", [])
     if isinstance(counts, dict):
         counts = [counts]
+    elif not isinstance(counts, list):
+        counts = []
     statistic = {}
     for entry in counts or []:
         if isinstance(entry, dict):
@@ -103,8 +139,9 @@ def parse_video(html):
                 statistic[action.rsplit("/", 1)[-1]] = number(entry.get("userInteractionCount"))
     views = statistic.get("WatchAction")
     count = statistic.get("CommentAction")
+    title = info.get("name")
     return {
-        "title": info.get("name") or text_at(soup, ".video-info h1"),
+        "title": (title if isinstance(title, str) else None) or text_at(soup, ".video-info h1"),
         "author": text_at(soup, ".video-info .channel-name"),
         "upload_date": upload_date(info.get("uploadDate") or text_at(soup, ".video-stat svg.time + span")),
         "view_count": views if views is not None else number(text_at(soup, ".video-stat svg.views + span")),
@@ -117,15 +154,17 @@ def parse_comments(html):
     for item in BeautifulSoup(html, "html.parser").select(".item-comment"):
         parent = item.find_parent(class_="item-comment")
         wrapper = item.select_one(":scope > .parent-comment") or item
-        body = wrapper.select_one(".comment-text")
-        if body:
-            comments.append({
-                "id": re.sub(r"^comment[-_]", "", item.get("id", "")) or None,
-                "parent_id": re.sub(r"^comment[-_]", "", parent.get("id", "")) or None if parent else None,
-                "author": text_at(wrapper, ".comment-author"),
-                "date_display": text_at(wrapper, ".comment-date"),
-                "text": body.get_text("\n", strip=True),
-            })
+        body = next((node for node in wrapper.select(".comment-text")
+                     if node.find_parent(class_="item-comment") is item), None)
+        if body is None:
+            raise ArchiveError("A comment had no recognizable body.")
+        comments.append({
+            "id": re.sub(r"^comment[-_]", "", item.get("id", "")) or None,
+            "parent_id": re.sub(r"^comment[-_]", "", parent.get("id", "")) or None if parent else None,
+            "author": text_at(wrapper, ".comment-author"),
+            "date_display": text_at(wrapper, ".comment-date"),
+            "text": body.get_text("\n", strip=True),
+        })
     return comments
 
 
@@ -133,7 +172,10 @@ def media_candidates(options):
     source = options.get("src")
     if not isinstance(source, str) or not source or source == "blank":
         return []
-    parts = urlsplit(urljoin(BASE, source))
+    try:
+        parts = urlsplit(urljoin(BASE, source))
+    except ValueError:
+        raise ArchiveError("Vbox7 returned an invalid video source URL.") from None
     host = parts.hostname or ""
     if parts.scheme != "https" or not (host == "vbox7.com" or host.endswith(".vbox7.com")):
         return []
@@ -143,7 +185,10 @@ def media_candidates(options):
     if suffix not in {".mpd", ".m3u8"}:
         return []
     stem = parts.path[:-len(suffix)]
-    sizes = {number(value) for value in options.get("resolutions") or []}
+    resolutions = options.get("resolutions")
+    if resolutions is not None and not isinstance(resolutions, list):
+        raise ArchiveError("Vbox7 returned an invalid list of video resolutions.")
+    sizes = {number(value) for value in resolutions or []}
     return [
         parts._replace(path=f"{stem}_{height}.mp4").geturl()
         for height in sorted(filter(None, sizes), reverse=True)
@@ -152,10 +197,17 @@ def media_candidates(options):
 
 def fetch(api, url, *, params=None, referer=None, as_json=False, include_url=False):
     headers = {"Referer": referer, "X-Requested-With": "XMLHttpRequest"} if referer else {}
-    try:
-        response = api.get(url, params=params, headers=headers, timeout=30_000)
-    except BrowserError:
-        raise ArchiveError("A Vbox7 request timed out or the connection failed.") from None
+    for attempt in range(2):
+        try:
+            response = api.get(url, params=params, headers=headers, timeout=30_000)
+        except BrowserError:
+            if attempt:
+                raise ArchiveError("A Vbox7 request timed out or the connection failed.") from None
+        else:
+            if response.status not in RETRYABLE_HTTP or attempt:
+                break
+            response.dispose()
+        sleep(1)
     try:
         if not response.ok:
             raise ArchiveError(f"Vbox7 returned HTTP {response.status}.")
@@ -172,33 +224,46 @@ def fetch(api, url, *, params=None, referer=None, as_json=False, include_url=Fal
         response.dispose()
 
 
+def matches_page(final, expected):
+    return (final.scheme == expected.scheme and final.netloc == expected.netloc
+            and unquote(final.path).casefold() == unquote(expected.path).casefold())
+
+
 def discover(api, username, visibility):
     url = profile_url(username, visibility)
-    expected_path = unquote(urlsplit(url).path).casefold()
+    expected = urlsplit(url)
     seen = set()
     page = 1
     while True:
         page_url = url if page == 1 else f"{url}&page={page}"
         html, final_url = fetch(api, page_url, include_url=True)
         final = urlsplit(final_url)
-        if (final.scheme != "https" or final.netloc != "www.vbox7.com"
-                or unquote(final.path).casefold() != expected_path):
+        if not matches_page(final, expected):
             raise ArchiveError("Vbox7 redirected the upload request away from the account's list.")
-        final_filter = parse_qs(final.query).get("filter")
+        query = parse_qs(final.query, keep_blank_values=True)
+        final_filter = query.get("filter")
         if page == 1 and visibility == "public" and final_filter == ["private"]:
-            print("Vbox7 redirects the public list to the private list.", flush=True)
-            return
-        if final_filter != [visibility]:
+            raise ArchiveError("Vbox7 redirected the public list to private. The public list is unverified.")
+        if final_filter != [visibility] or query.get("p") != ["items"]:
             raise ArchiveError("Vbox7 returned a different visibility list.")
-        uploads, has_next = parse_listing(html)
+        final_page = query.get("page", ["1"])
+        if final_page != [str(page)]:
+            raise ArchiveError("Vbox7 returned a different upload page during pagination.")
+        issue = None
+        try:
+            uploads, has_next = parse_listing(html, page=page)
+        except IncompleteListing as error:
+            uploads, has_next, issue = error.uploads, False, error
         new = []
         for upload in uploads:
             if upload["id"] not in seen:
                 seen.add(upload["id"])
                 new.append(upload)
+        yield from new
+        if issue:
+            raise issue
         if not new and (page > 1 or has_next):
             raise ArchiveError("Vbox7 stopped returning new uploads during pagination.")
-        yield from new
         if not has_next:
             return
         page += 1
@@ -209,23 +274,36 @@ def collect_comments(api, record):
     seen = set()
     page = 1
     total = None
+    page_size = None
     while True:
         try:
             data = fetch(api, f"{BASE}/aj/comments", as_json=True, referer=record["url"],
                          params={"mdkey": record["id"], "page": page, "order": "date"})
-            paging = data.get("pagination") or {}
+            paging = data.get("pagination")
+            if not isinstance(paging, dict):
+                raise ArchiveError("Vbox7 returned unrecognized comment pagination.")
             reported = number(paging.get("total"))
             per_page = number(paging.get("perPage"))
             if reported is None or not per_page or not isinstance(data.get("html"), str):
                 raise ArchiveError("Vbox7 returned an unrecognized comment list.")
-            total = reported
+            if total is not None and (reported != total or per_page != page_size):
+                raise ArchiveError("Vbox7's comment pagination changed during collection.")
+            total, page_size = reported, per_page
             batch = parse_comments(data["html"])
-            new = [comment for comment in batch if not comment["id"] or comment["id"] not in seen]
-            if total and not new:
+            previous_count = len(comments)
+            for comment in batch:
+                comment_id = comment["id"]
+                if comment_id and comment_id in seen:
+                    continue
+                comments.append(comment)
+                if comment_id:
+                    seen.add(comment_id)
+            if total and len(comments) == previous_count:
                 raise ArchiveError("Vbox7 stopped returning new comments before the last page.")
-            comments.extend(new)
-            seen.update(comment["id"] for comment in new if comment["id"])
             if page * per_page >= total:
+                root_count = sum(comment["parent_id"] is None for comment in comments)
+                if total != len(comments) and (not total or total != root_count):
+                    raise ArchiveError("The parsed comments did not match Vbox7's reported total.")
                 return comments, total, None
             page += 1
         except ArchiveError as error:
@@ -250,44 +328,70 @@ def show_download_progress(size, total=None, *, complete=False):
 
 
 def stream_mp4(http, url, referer, destination):
-    partial = destination.with_suffix(".mp4.part")
-    try:
-        with http.get(url, headers={"Referer": referer, "Accept-Encoding": "identity"},
-                      stream=True, timeout=(15, 45)) as response:
-            if response.status_code != 200:
-                return False
-            chunks = response.iter_content(chunk_size=1024 * 1024)
-            first = next(chunks, b"")
-            if first[4:8] != b"ftyp":
-                return False
-            expected = number(response.headers.get("Content-Length"))
-            size = len(first)
-            with partial.open("wb") as output:
-                output.write(first)
-                show_download_progress(size, expected)
-                last_update = monotonic()
-                for chunk in chunks:
+    deadline = monotonic() + DOWNLOAD_DEADLINE
+    for attempt in range(2):
+        if monotonic() >= deadline:
+            raise ArchiveError("The direct video transfer exceeded its time limit.")
+        try:
+            with http.get(url, headers={"Referer": referer, "Accept-Encoding": "identity"},
+                          stream=True, timeout=(15, 45)) as response:
+                if response.status_code != 200:
+                    status = response.status_code
+                    if status not in RETRYABLE_HTTP or attempt:
+                        raise ArchiveError(f"Direct video download returned HTTP {status}.")
+                else:
+                    save_mp4_response(response, destination, deadline)
+                    return
+        except (requests.ConnectionError, requests.Timeout, requests.exceptions.ChunkedEncodingError):
+            if attempt or monotonic() >= deadline:
+                raise ArchiveError("The direct video transfer timed out or the connection failed.") from None
+        except requests.RequestException:
+            raise ArchiveError("The direct video request failed.") from None
+        sleep(1)
+
+
+def save_mp4_response(response, destination, deadline):
+    expected = number(response.headers.get("Content-Length"))
+    size = 0
+    last_update = monotonic() - 2
+    prefix = b""
+    with staged_file(destination) as partial:
+        with partial.open("wb") as output:
+            for chunk in response.iter_content(chunk_size=256 * 1024):
+                now = monotonic()
+                if now >= deadline:
+                    raise ArchiveError("The direct video transfer exceeded its time limit.")
+                if chunk:
+                    if size == 0:
+                        chunk = prefix + chunk
+                        if len(chunk) < 8:
+                            prefix = chunk
+                            continue
+                        if not video_header_valid(chunk, ".mp4"):
+                            raise ArchiveError("The direct download did not contain a recognized MP4 header.")
                     output.write(chunk)
                     size += len(chunk)
-                    now = monotonic()
-                    if now - last_update >= 2 and (expected is None or size < expected):
+                    if now - last_update >= 2:
                         show_download_progress(size, expected)
                         last_update = now
-            if expected is not None and size != expected:
-                return False
+        if not size:
+            raise ArchiveError("The direct download did not contain a recognized MP4 header.")
+        if expected is not None and size != expected:
+            raise ArchiveError("The direct video transfer had an unexpected file size.")
+        if not valid_video(partial, ".mp4"):
+            raise ArchiveError("The direct MP4 download did not contain readable media data.")
         partial.replace(destination)
-        show_download_progress(size, expected, complete=True)
-        return True
-    except requests.RequestException:
-        return False
-    finally:
-        partial.unlink(missing_ok=True)
+    show_download_progress(size, expected, complete=True)
 
 
 def browser_download(page, record, destination):
     """Try a download action in the site's video options when available."""
     try:
-        page.goto(record["url"], wait_until="domcontentloaded", timeout=20_000)
+        response = page.goto(record["url"], wait_until="domcontentloaded", timeout=20_000)
+        if not matches_page(urlsplit(page.url), urlsplit(record["url"])):
+            raise ArchiveError("Chrome was redirected away from the requested video.")
+        if response is not None and not response.ok:
+            raise ArchiveError(f"Chrome's video page returned HTTP {response.status}.")
         menu = page.locator("#item-options")
         action = menu.get_by_text(DOWNLOAD_LABEL).first
         if not action.count():
@@ -299,151 +403,164 @@ def browser_download(page, record, destination):
         download = event.value
         suffix = Path(download.suggested_filename).suffix.lower()
         if suffix not in VIDEO_EXTENSIONS:
-            return None
+            download.cancel()
+            raise ArchiveError("Chrome offered a file with an unsupported video extension.")
         print("  Downloading with Chrome...", flush=True)
         if download.failure():
-            return None
+            raise ArchiveError("Chrome could not complete the video transfer.")
         output = destination.with_suffix(suffix)
-        partial = output.with_suffix(suffix + ".part")
-        try:
+        with staged_file(output) as partial:
             download.save_as(partial)
+            if not valid_video(partial, suffix):
+                raise ArchiveError("Chrome's download did not contain a recognized video header.")
             size = partial.stat().st_size
-            if size:
-                partial.replace(output)
-                show_download_progress(size, complete=True)
-                return output
-        finally:
-            partial.unlink(missing_ok=True)
+            partial.replace(output)
+        show_download_progress(size, complete=True)
+        return output
     except BrowserError:
-        pass
-    return None
-
-
-def nonempty_file(path):
-    return path.is_file() and path.stat().st_size > 0
-
-
-def existing_video(record, video_dir):
-    filename = record.get("video_file") or f"{record['id']}.mp4"
-    path = video_dir / Path(filename).name
-    if nonempty_file(path):
-        return path
-    return None
+        raise ArchiveError("Chrome could not open the video page or use its download control.") from None
 
 
 def save_placeholder_static(api, video_dir):
     # The player overlays this GIF on its blank MP4 to display the static effect.
     path = video_dir / "vbox7-static.gif"
-    if nonempty_file(path):
+    if valid_static(path):
         return path
     data = fetch(api, PLACEHOLDER_STATIC_URL)
     if not data.startswith((b"GIF87a", b"GIF89a")):
         raise ArchiveError("Vbox7 did not return the static placeholder GIF.")
-    partial = path.with_suffix(".gif.part")
-    try:
+    with staged_file(path) as partial:
         partial.write_bytes(data)
         partial.replace(path)
-    finally:
-        partial.unlink(missing_ok=True)
     return path
 
 
-def archive_video(api, page, http, record, video_dir):
-    errors = {}
+def needs_download(existing, retry_placeholders):
+    return existing is None or (retry_placeholders and is_placeholder(existing))
+
+
+def download_video(api, page, http, record, video_dir, existing, errors):
+    destination = video_dir / f"{record['id']}.mp4"
+    blank = False
+    failures = []
     try:
-        details = parse_video(fetch(api, record["url"]))
+        payload = fetch(api, f"{BASE}/aj/player/item/options", as_json=True, referer=record["url"],
+                        params={"vid": record["id"]})
+        options = payload.get("options")
+        if not isinstance(options, dict):
+            raise ArchiveError("Vbox7 returned unrecognized player options.")
+        title = options.get("title")
+        if isinstance(title, str) and title and not record.get("title"):
+            record["title"] = title
+        blank = options.get("src") == "blank"
+        if blank:
+            placeholder = destination.with_suffix(".placeholder.mp4")
+            print("  Original unavailable. Saving the Vbox7 placeholder.", flush=True)
+            if not valid_video(placeholder):
+                stream_mp4(http, PLACEHOLDER_VIDEO_URL, record["url"], placeholder)
+            return placeholder, True
+        candidates = media_candidates(options)
+        if not candidates:
+            failures.append("Vbox7 did not return a supported direct video source.")
+        for source in candidates:
+            try:
+                stream_mp4(http, source, record["url"], destination)
+                return destination, False
+            except ArchiveError as error:
+                failures.append(str(error))
+    except ArchiveError as error:
+        failures.append(str(error))
+    if not blank:
+        try:
+            file = browser_download(page, record, destination)
+            if file is not None:
+                return file, False
+            failures.append("Chrome did not find a download control.")
+        except ArchiveError as error:
+            failures.append(str(error))
+    errors["download"] = " ".join(dict.fromkeys(failures))
+    return existing, blank
+
+
+def archive_video(api, page, http, record, video_dir, *, retry_placeholders=False):
+    errors = {}
+    saved_comments = record.get("comments")
+    saved_comment_count = record.get("comment_count")
+    has_saved_comments = bool(saved_comments) or (saved_comments == [] and saved_comment_count == 0)
+    try:
+        html, final_url = fetch(api, record["url"], include_url=True)
+        if not matches_page(urlsplit(final_url), urlsplit(record["url"])):
+            raise ArchiveError("Vbox7 redirected the metadata request away from the requested video.")
+        details = parse_video(html)
         record.update({key: value for key, value in details.items() if value is not None})
     except ArchiveError as error:
         errors["video_page"] = str(error)
 
-    destination = video_dir / f"{record['id']}.mp4"
-    existing = existing_video(record, video_dir)
-    if existing is not None:
-        record["video_file"] = f"videos/{existing.name}"
-    else:
-        record["video_file"] = None
-        record.pop("video_is_placeholder", None)
-        source_unavailable = False
-        try:
-            payload = fetch(api, f"{BASE}/aj/player/item/options", as_json=True, referer=record["url"],
-                            params={"vid": record["id"]})
-            options = payload.get("options") or {}
-            if options.get("title") and not record.get("title"):
-                record["title"] = options["title"]
-            source_unavailable = options.get("src") == "blank"
-            if source_unavailable:
-                placeholder = destination.with_suffix(".placeholder.mp4")
-                print("  Original unavailable. Saving the Vbox7 placeholder.", flush=True)
-                if nonempty_file(placeholder) or stream_mp4(http, PLACEHOLDER_VIDEO_URL, record["url"], placeholder):
-                    record["video_file"] = f"videos/{placeholder.name}"
-                    record["video_is_placeholder"] = True
-                else:
-                    errors["download"] = "Vbox7's placeholder video could not be saved."
-            else:
-                for source in media_candidates(options):
-                    if stream_mp4(http, source, record["url"], destination):
-                        record["video_file"] = f"videos/{destination.name}"
-                        break
-        except ArchiveError as error:
-            errors["download"] = str(error)
-        if record["video_file"] is None and not source_unavailable:
-            file = browser_download(page, record, destination)
-            if file:
-                record["video_file"] = f"videos/{file.name}"
-                errors.pop("download", None)
-            else:
-                errors.setdefault("download", "No downloadable video was returned. Check its download control in Vbox7.")
+    file = existing_video(record, video_dir)
+    blank = False
+    if needs_download(file, retry_placeholders):
+        file, blank = download_video(api, page, http, record, video_dir, file, errors)
+    record["video_file"] = f"videos/{file.name}" if file is not None else None
+    record.pop("video_is_placeholder", None)
+    if is_placeholder(file):
+        record["video_is_placeholder"] = True
 
     record.pop("placeholder_static_file", None)
-    if record.get("video_is_placeholder"):
+    if is_placeholder(file):
         try:
-            static = save_placeholder_static(api, video_dir)
+            static = video_dir / "vbox7-static.gif"
+            if not valid_static(static):
+                if not blank:
+                    payload = fetch(api, f"{BASE}/aj/player/item/options", as_json=True, referer=record["url"],
+                                    params={"vid": record["id"]})
+                    options = payload.get("options")
+                    if not isinstance(options, dict) or options.get("src") != "blank":
+                        raise ArchiveError("The signed-in player did not confirm a blank source for the overlay.")
+                static = save_placeholder_static(api, video_dir)
             record["placeholder_static_file"] = f"videos/{static.name}"
         except ArchiveError as error:
             errors["placeholder_static"] = str(error)
 
     comments, total, error = collect_comments(api, record)
-    if not error or not record.get("comments") or len(comments) > len(record["comments"]):
+    if not error or not has_saved_comments:
         record["comments"] = comments
-    if total is not None:
-        record["comment_count"] = total
+        if total is not None:
+            record["comment_count"] = total
     if error:
         errors["comments"] = error
+        if has_saved_comments:
+            record["comment_count"] = saved_comment_count
     missing = [key for key in ("title", "upload_date", "view_count", "comment_count") if record.get(key) is None]
     if missing:
         errors["metadata"] = "Vbox7 did not return " + ", ".join(missing) + "."
     record["errors"] = errors
 
 
-def save_json(path, data):
-    temporary = path.with_suffix(".json.part")
-    with temporary.open("w", encoding="utf-8") as output:
-        json.dump(data, output, ensure_ascii=False, indent=2)
-        output.write("\n")
-    temporary.replace(path)
-
-
 def wait_for_sign_in(context, username):
     private_url = profile_url(username, "private")
+    expected = urlsplit(private_url)
     deadline = monotonic() + 600
     warned_about_account = False
     while monotonic() < deadline:
         if not context.pages:
             break
         try:
-            html = fetch(context.request, private_url)
-            owner = re.search(rb"""\bglobalLoginUser\s*=\s*(["'])([^"']*)\1""", html)
+            html, final_url = fetch(context.request, private_url, include_url=True)
+            final = urlsplit(final_url)
+            owner = None
+            query = parse_qs(final.query)
+            if matches_page(final, expected) and query.get("p") == ["items"] and query.get("filter") == ["private"]:
+                for script in BeautifulSoup(html, "html.parser").find_all("script", src=False):
+                    owner = re.search(r"""\bglobalLoginUser\s*=\s*(["'])([^"']*)\1""", script.string or "")
+                    if owner:
+                        break
             if owner and owner[2]:
-                if owner[2].decode("utf-8", errors="replace").casefold() == username.casefold():
+                if owner[2].casefold() == username.casefold():
                     return
                 if not warned_about_account:
                     print(f"The browser is signed into another account. Switch to {username} to continue.",
                           flush=True)
                     warned_about_account = True
-            # The signed-out profile can show the private tab but never its videos.
-            uploads, _ = parse_listing(html)
-            if uploads and not owner:
-                return
         except ArchiveError:
             pass
         sleep(3)
@@ -453,15 +570,15 @@ def wait_for_sign_in(context, username):
 def run(args):
     video_dir = args.output / "videos"
     index = args.output / "misc" / "metadata.json"
-    if not args.dry_run:
+    if args.dry_run:
+        return run_archive(args, video_dir, index)
+    with archive_lock(index.parent):
         video_dir.mkdir(parents=True, exist_ok=True)
-        index.parent.mkdir(parents=True, exist_ok=True)
-    catalog = json.loads(index.read_text(encoding="utf-8")) if index.is_file() else {
-        "username": args.username, "uploads": {},
-    }
-    if catalog["username"].casefold() != args.username.casefold():
-        raise ArchiveError("This output folder belongs to another Vbox7 account. Choose a different --output.")
-    records = catalog["uploads"]
+        return run_archive(args, video_dir, index)
+
+
+def run_archive(args, video_dir, index):
+    catalog = load_catalog(index, args.username)
 
     with sync_playwright() as playwright, requests.Session() as http:
         try:
@@ -470,66 +587,75 @@ def run(args):
             raise ArchiveError(
                 "Could not open Google Chrome. Make sure it is installed and opens from your desktop."
             ) from None
-        context = browser.new_context(accept_downloads=True)
-        login = context.new_page()
-        print(f"Sign in as {args.username} in the browser window. The upload scan starts after sign-in.",
-              flush=True)
-        target = urlsplit(profile_url(args.username, "private"))
-        login.goto(f"{BASE}/login?" + urlencode({"backto": f"{target.path}?{target.query}"}),
-                   wait_until="domcontentloaded", timeout=45_000)
-        wait_for_sign_in(context, args.username)
-        print("Sign-in detected. Scanning uploads.", flush=True)
+        with closing(browser), closing(browser.new_context(accept_downloads=True)) as context:
+            login = context.new_page()
+            print(f"Sign in as {args.username} in the browser window. The upload scan starts after sign-in.",
+                  flush=True)
+            target = urlsplit(profile_url(args.username, "private"))
+            login.goto(f"{BASE}/login?" + urlencode({"backto": f"{target.path}?{target.query}"}),
+                       wait_until="domcontentloaded", timeout=45_000)
+            wait_for_sign_in(context, args.username)
+            print("Sign-in detected. Scanning uploads.", flush=True)
+            return process_archive(args, context, http, catalog, video_dir, index)
 
-        work = {}
-        listing_errors = {}
-        for visibility in FILTERS:
-            count = 0
-            try:
-                for upload in discover(context.request, args.username, visibility):
-                    video_id = upload["id"]
-                    record = records.setdefault(video_id, {"comments": [], "comment_count": None})
-                    record.update({key: value for key, value in upload.items() if value is not None})
-                    record["author"] = record.get("author") or catalog["username"]
+
+def process_archive(args, context, http, catalog, video_dir, index):
+    records = catalog["uploads"]
+    work = {}
+    listing_errors = {}
+    for visibility in FILTERS:
+        count = 0
+        try:
+            for upload in discover(context.request, args.username, visibility):
+                video_id = upload["id"]
+                count += 1
+                if video_id in work:
+                    if work[video_id]["visibility"] != visibility:
+                        print(f"  {video_id} also appears in {visibility}. Keeping its first visibility.", flush=True)
+                    continue
+                record = records.setdefault(video_id, {"comments": [], "comment_count": None})
+                record.update({key: value for key, value in upload.items() if value is not None})
+                record["author"] = record.get("author") or catalog["username"]
+                previous_visibility = record.get("visibility")
+                if not isinstance(previous_visibility, str) or previous_visibility not in listing_errors:
                     record["visibility"] = visibility
-                    work[video_id] = record
-                    count += 1
-            except ArchiveError as error:
-                listing_errors[visibility] = str(error)
-                print(f"{visibility} listing: {error}", file=sys.stderr)
-            print(f"{visibility}: {count} upload(s)", flush=True)
+                work[video_id] = record
+        except ArchiveError as error:
+            listing_errors[visibility] = str(error)
+            print(f"{visibility} listing: {error}", file=sys.stderr)
+        print(f"{visibility}: {count} upload(s)", flush=True)
 
-        selected = list(work.values())[:args.limit]
-        if args.dry_run:
-            downloads = sum(existing_video(record, video_dir) is None for record in selected)
-            print(f"Dry run. Uploads found: {len(work)}. Uploads selected: {len(selected)}. "
-                  f"New downloads planned: {downloads}.")
-            if listing_errors:
-                print("The upload scan was incomplete. Counts reflect the uploads found so far.")
-            context.close()
-            browser.close()
-            return int(bool(listing_errors))
+    selected = list(work.values())[:args.limit]
+    if args.dry_run:
+        downloads = sum(needs_download(existing_video(record, video_dir), args.retry_placeholders)
+                        for record in selected)
+        print(f"Dry run. Uploads found: {len(work)}. Uploads selected: {len(selected)}. "
+              f"New downloads planned: {downloads}.")
+        if listing_errors:
+            print("The upload scan was incomplete. Counts reflect the uploads found so far.")
+        return int(bool(listing_errors))
 
-        catalog.update({"listing_errors": listing_errors, "scan_complete": not listing_errors,
-                        "last_run_limit": args.limit})
-        save_json(index, catalog)
-        if not work:
-            raise ArchiveError("No uploads were found. Verify the uploads list in the signed-in browser.")
+    catalog.update({"listing_errors": listing_errors, "scan_complete": not listing_errors,
+                    "last_run_limit": args.limit})
+    save_json(index, catalog)
+    flagged = 0
+    if selected:
         page = context.new_page()
-        flagged = 0
         for offset, record in enumerate(selected, start=1):
             print(f"[{offset}/{len(selected)}] {record['id']} {record.get('title') or ''}", flush=True)
-            archive_video(context.request, page, http, record, video_dir)
-            save_json(index, catalog)
+            previous = record.copy()
+            archive_video(context.request, page, http, record, video_dir,
+                          retry_placeholders=args.retry_placeholders)
+            if previous != record:
+                save_json(index, catalog)
             if record["errors"]:
                 flagged += 1
                 print(f"  Review: {', '.join(record['errors'])}", flush=True)
-        placeholders = sum(bool(r.get("video_is_placeholder")) for r in selected)
-        videos = sum(bool(r["video_file"]) for r in selected) - placeholders
-        print(f"Videos saved: {videos}/{len(selected)}. Placeholders saved: {placeholders}. "
-              f"Entries to review: {flagged}. Index: {index}", flush=True)
-        context.close()
-        browser.close()
-        return int(bool(flagged or listing_errors))
+    placeholders = sum(bool(r.get("video_is_placeholder")) for r in selected)
+    videos = sum(bool(r["video_file"]) for r in selected) - placeholders
+    print(f"Videos saved: {videos}/{len(selected)}. Placeholders saved: {placeholders}. "
+          f"Entries to review: {flagged}. Index: {index}", flush=True)
+    return int(bool(flagged or listing_errors))
 
 
 def main():
@@ -542,9 +668,12 @@ def main():
     parser.add_argument("--limit", type=int, help="process at most this many uploads, private first")
     parser.add_argument("--dry-run", action="store_true",
                         help="show upload and planned download counts without writing archive files")
+    parser.add_argument("--retry-placeholders", action="store_true",
+                        help="check whether saved placeholders can be replaced with original videos")
     args = parser.parse_args()
     if not args.username.strip() or (args.limit is not None and args.limit < 1):
         parser.error("provide a username and a positive --limit when using it")
+    args.username = args.username.strip()
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(errors="replace")
     try:
